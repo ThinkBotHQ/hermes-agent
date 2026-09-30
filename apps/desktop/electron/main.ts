@@ -382,9 +382,6 @@ import {
 } from './owner-grant-continuity'
 import { createOwnerKeyStore, defaultOwnerGrantsDir, defaultOwnerKeyDir } from './owner-grant-key'
 import { verifyStoredOwnerGrant } from './owner-grant-verify'
-import { createSessionBindingIpcHandlers } from './session-binding-ipc'
-import { createSessionAttestationIssuer } from './session-binding-issuer'
-import { createSessionBindingStore } from './session-binding-store'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
 import { bundledPayload, installIdForRoot, type PayloadInfo } from './payload-backend'
@@ -491,6 +488,9 @@ import {
 } from './secret-storage-policy'
 import { selectPathsDialogProperties } from './select-paths-dialog'
 import { describeGitSpawnFailure, GIT_UNUSABLE, selectRunnableBinary } from './select-runnable-binary'
+import { createSessionBindingIpcHandlers } from './session-binding-ipc'
+import { createSessionAttestationIssuer } from './session-binding-issuer'
+import { createSessionBindingStore } from './session-binding-store'
 import {
   buildInstanceWindowUrl,
   buildSessionWindowUrl,
