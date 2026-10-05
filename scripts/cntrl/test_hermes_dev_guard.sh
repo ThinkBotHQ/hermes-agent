@@ -190,6 +190,29 @@ stall_took=$((SECONDS - stall_started))
 if (( stall_took > 12 )); then print "CASE WRONG e2e stalled fetch: two launches took ${stall_took}s (the fetch was not bounded)"; failures=$((failures + 1)); else print "CASE OK    e2e stalled fetch: two launches took ${stall_took}s"; fi
 rm -f "$E2E/bin/git"; unset HERMES_SHIP_FETCH_TIMEOUT
 
+# A git command killed mid-run leaves index.lock behind. The launcher removes it only when it
+# is provably stale (over 30 s old AND no git process running). pgrep is stubbed so the cases
+# do not depend on what else runs git on this machine.
+LOCK=$(git -C "$E2E/repo" rev-parse --git-path index.lock); LOCK="$E2E/repo/$LOCK"
+age_lock() { : >"$LOCK"; touch -t "$(date -v-"$1"S +%Y%m%d%H%M.%S)" "$LOCK"; }
+lock_case() {  # <label> <expect: gone|kept>
+  local state=kept; [[ -e "$LOCK" ]] || state=gone
+  if [[ "$state" == "$2" ]]; then print "CASE OK    e2e $1: lock $state"; else print "CASE WRONG e2e $1: lock $state (want $2)"; failures=$((failures + 1)); fi
+  rm -f "$LOCK"
+}
+print '#!/bin/sh\nexit 1' >"$E2E/bin/pgrep" && chmod +x "$E2E/bin/pgrep"   # no git process running
+age_lock 90
+launch "$E2E_B" "removed a stale git lock" "stale lock, no git running: removed"
+lock_case "stale lock, no git running" gone
+age_lock 0
+launch "$E2E_B" "may be live; not removing it" "fresh lock: left alone"
+lock_case "fresh lock" kept
+print '#!/bin/sh\nexit 0' >"$E2E/bin/pgrep"                                  # a git process is running
+age_lock 90
+launch "$E2E_B" "may be live; not removing it" "old lock but git is running: left alone"
+lock_case "old lock, git running" kept
+rm -f "$E2E/bin/pgrep"
+
 print
 if (( failures )); then
   print "harness: $failures case(s) WRONG"

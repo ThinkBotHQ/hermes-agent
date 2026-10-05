@@ -213,6 +213,18 @@ elif git merge-base --is-ancestor HEAD "$SHIP"; then
     fi
   fi
   if (( guard_ok )); then
+    # A git command killed mid-run (an agent session stopped, a terminal closed)
+    # leaves index.lock behind and every later sync fails. Clear it only when it
+    # is provably stale: no git process is running at all and it is over 30 s old.
+    stale_lock=$(git rev-parse --git-path index.lock)
+    if [[ -e "$stale_lock" ]]; then
+      stale_age=$(( $(date +%s) - $(stat -f %m "$stale_lock") ))
+      if ! pgrep -x git >/dev/null && (( stale_age > 30 )); then
+        rm -f "$stale_lock" && print -P "%F{yellow}hermes-dev: removed a stale git lock (${stale_age}s old, no git process running)%f"
+      else
+        print -P "%F{yellow}hermes-dev: git lock is ${stale_age}s old and may be live; not removing it%f"
+      fi
+    fi
     git merge --ff-only --quiet "$SHIP" || { print -P "%F{red}hermes-dev: sync failed (see git error above)%f"; exit 1; }
     after=$(git rev-parse HEAD)
     if [[ "$before" != "$after" ]]; then
