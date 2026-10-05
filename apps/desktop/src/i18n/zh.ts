@@ -1392,6 +1392,10 @@ export const zh = defineLocale({
       kindRemoteDesc: '可通过 HTTP(S) 访问的 Hermes 网关——局域网、Tailscale 或互联网。',
       kindCloudDesc: '通过你的 Hermes Cloud 账户发现的托管实例。',
       kindSshDesc: '通过 SSH 访问的 Hermes 安装。',
+      kindSshAttach: 'SSH (附加到主机后端)',
+      kindSshAttachShort: 'SSH (附加)',
+      kindSshAttachDesc:
+        '主机在自身 supervisor 下运行 hermes serve；桌面端从不启动或停止它。',
       labelTitle: '名称',
       labelDesc: '必填。此实例出现的所有位置都会显示该名称；必须唯一（例如“家庭服务器”、“工作笔记本”）。',
       labelPlaceholder: '家庭服务器',

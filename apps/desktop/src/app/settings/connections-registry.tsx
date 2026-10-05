@@ -30,7 +30,8 @@ const KIND_ICONS: Record<DesktopConnectionKind, typeof Globe> = {
   cloud: Cloud,
   local: Monitor,
   remote: Globe,
-  ssh: Terminal
+  ssh: Terminal,
+  'ssh-attach': Terminal
 }
 
 interface EditorState {
@@ -156,7 +157,7 @@ export function findDuplicateConnection(
   return (
     connections.find(
       c =>
-        c.kind === 'ssh' &&
+        (c.kind === 'ssh' || c.kind === 'ssh-attach') &&
         c.id !== editor.id &&
         sshCompositeKey(`${c.user ? `${c.user}@` : ''}${c.host ?? ''}${c.port ? `:${c.port}` : ''}`) === key &&
         (c.remoteProfile || '').trim() === profile
@@ -300,7 +301,7 @@ export function ConnectionsRegistrySection() {
         setDupeError(
           editor.kind === 'local'
             ? s.duplicateLocal
-            : editor.kind === 'ssh'
+            : editor.kind === 'ssh' || editor.kind === 'ssh-attach'
               ? s.duplicateSsh(dupe.label)
               : s.duplicateUrl(dupe.label)
         )
@@ -345,7 +346,7 @@ export function ConnectionsRegistrySection() {
               headerEntries.map(row => [row.name, row.value ? row.value : row.stored ? null : ''])
             )
           }
-        } else if (editor.kind === 'ssh') {
+        } else if (editor.kind === 'ssh' || editor.kind === 'ssh-attach') {
           // The composite host string (user@host:port) is the single source
           // of truth — never send separate user/port (see editorFromConnection).
           payload.host = editor.host
@@ -509,7 +510,11 @@ export function ConnectionsRegistrySection() {
     cloud: { desc: s.kindCloudDesc, label: s.kindCloud },
     local: { desc: s.kindLocalDesc, label: s.kindLocal },
     remote: { desc: s.kindRemoteDesc, label: s.kindRemote },
-    ssh: { desc: s.kindSshDesc, label: s.kindSsh }
+    ssh: { desc: s.kindSshDesc, label: s.kindSsh },
+    'ssh-attach': {
+      desc: s.kindSshAttachDesc,
+      label: s.kindSshAttach
+    }
   }
 
   const sortedConnections = useMemo(
@@ -599,7 +604,7 @@ export function ConnectionsRegistrySection() {
           const sameBackendPeer = sameBackendPeerLabel(conn, sortedConnections)
 
           const baseDescription =
-            conn.kind === 'ssh'
+            conn.kind === 'ssh' || conn.kind === 'ssh-attach'
               ? `${kindMeta[conn.kind].label} · ${conn.user ? `${conn.user}@` : ''}${conn.host}${conn.port ? `:${conn.port}` : ''}`
               : conn.url
                 ? `${kindMeta[conn.kind].label} · ${conn.url}`
@@ -668,11 +673,11 @@ export function ConnectionsRegistrySection() {
 
       {editor ? (
         <div className="mt-4 space-y-3 rounded-lg border border-border/60 p-4">
-          <div className="grid grid-cols-2 gap-2 @2xl:grid-cols-4">
+          <div className="grid grid-cols-2 gap-2 @2xl:grid-cols-5">
             {/* Kind is fixed once created (buttons disable on edit). On create
                 every kind is offered; Local is disabled while the managed
                 local entry exists (the registry holds at most one). */}
-            {(editor.id ? ([editor.kind] as const) : (['local', 'cloud', 'remote', 'ssh'] as const)).map(kind => (
+            {(editor.id ? ([editor.kind] as const) : (['local', 'cloud', 'remote', 'ssh', 'ssh-attach'] as const)).map(kind => (
               <Button
                 disabled={Boolean(editor.id) || (kind === 'local' && hasLocal)}
                 key={kind}
@@ -805,7 +810,7 @@ export function ConnectionsRegistrySection() {
             </div>
           )}
 
-          {editor.kind === 'ssh' && (
+          {(editor.kind === 'ssh' || editor.kind === 'ssh-attach') && (
             <>
               <ListRow
                 action={

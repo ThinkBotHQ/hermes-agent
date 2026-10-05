@@ -1750,6 +1750,10 @@ export const esOverrides = {
       kindRemoteDesc: 'Un gateway de Hermes accesible por HTTP(S): LAN, Tailscale o internet.',
       kindCloudDesc: 'Una instancia alojada detectada a través de tu cuenta de Hermes Cloud.',
       kindSshDesc: 'Una instalación de Hermes accesible por SSH.',
+      kindSshAttach: 'SSH (acoplar al backend del host)',
+      kindSshAttachShort: 'SSH (acoplar)',
+      kindSshAttachDesc:
+        'El host ejecuta hermes serve bajo su propio supervisor; la aplicación de escritorio nunca lo inicia ni lo detiene.',
       labelTitle: 'Nombre',
       labelDesc:
         'Obligatorio. Se muestra en todos los lugares donde aparece esta instancia; debe ser único (p. ej., “Homelab”, “Portátil del trabajo”).',

@@ -1218,7 +1218,7 @@ export interface DesktopConnectionTestResult {
 
 // ── v2 multi-connection registry (named agent sources) ─────────────────────
 
-export type DesktopConnectionKind = 'cloud' | 'local' | 'remote' | 'ssh'
+export type DesktopConnectionKind = 'cloud' | 'local' | 'remote' | 'ssh' | 'ssh-attach'
 
 // A registered agent source as the renderer sees it: token bytes never cross
 // the IPC boundary (preview + set flag instead, like DesktopConnectionConfig).

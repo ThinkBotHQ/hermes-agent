@@ -1436,6 +1436,10 @@ export const en: Translations = {
       kindRemoteDesc: 'A Hermes gateway reachable over HTTP(S) — LAN, Tailscale, or the internet.',
       kindCloudDesc: 'A hosted instance discovered through your Hermes Cloud account.',
       kindSshDesc: 'A Hermes install reached over SSH.',
+      kindSshAttach: 'SSH (attach to host backend)',
+      kindSshAttachShort: 'SSH (attach)',
+      kindSshAttachDesc:
+        'Host runs hermes serve under its own supervisor; the desktop never starts or stops it.',
       labelTitle: 'Name',
       labelDesc: 'Required. Shown everywhere this instance appears; must be unique (e.g. “Homelab”, “Work laptop”).',
       labelPlaceholder: 'Homelab',

@@ -44,7 +44,7 @@ export const LOCAL_CONNECTION_ID = 'local'
 /** Connection kinds. 'cloud' is remote-shaped (see modeIsRemoteLike) but keeps
  * its provenance so the UI can render the right card and updates can skip
  * platform-managed instances. */
-export type ConnectionKind = 'cloud' | 'local' | 'remote' | 'ssh'
+export type ConnectionKind = 'cloud' | 'local' | 'remote' | 'ssh' | 'ssh-attach'
 
 export interface RegistryConnection {
   id: string
@@ -308,7 +308,7 @@ export function resolvedConnectionId(
     const target = normalizedSshTarget(ssh)
 
     const coarseMatches = registry.connections.filter(
-      connection => connection.kind === 'ssh' && normalizedSshTarget(connection) === target
+      connection => (connection.kind === 'ssh' || connection.kind === 'ssh-attach') && normalizedSshTarget(connection) === target
     )
 
     if (!target || coarseMatches.length !== 1) {
@@ -403,7 +403,13 @@ export async function reuseMatchingPrimarySshBackend({
   const id = String(connectionId ?? '').trim()
   const profileKey = String(profile ?? '').trim() || 'default'
 
-  if (profileKey !== 'default' || !id || id !== registry.primary || source.id !== id || source.kind !== 'ssh') {
+  if (
+    profileKey !== 'default' ||
+    !id ||
+    id !== registry.primary ||
+    source.id !== id ||
+    (source.kind !== 'ssh' && source.kind !== 'ssh-attach')
+  ) {
     return null
   }
 
@@ -475,7 +481,12 @@ export async function reuseMatchingPrimaryRemoteBackend<T extends ResolvedConnec
   registry,
   source
 }: ReuseMatchingPrimaryRemoteBackendOptions<T>): Promise<(T & SharedRegistryProfileScope) | null> {
-  if (connectionId !== registry.primary || source.kind === 'local' || source.kind === 'ssh') {
+  if (
+    connectionId !== registry.primary ||
+    source.kind === 'local' ||
+    source.kind === 'ssh' ||
+    source.kind === 'ssh-attach'
+  ) {
     return null
   }
 
@@ -674,7 +685,7 @@ export function rememberSshEnumeration(
     return { profiles: cached, error: enumeration.error }
   }
 
-  if (kind === 'ssh' && enumeration.error === 'connect-on-demand') {
+  if ((kind === 'ssh' || kind === 'ssh-attach') && enumeration.error === 'connect-on-demand') {
     return { profiles: ['default'], error: 'connect-on-demand' }
   }
 
@@ -820,7 +831,13 @@ export function buildAgentRoster(
 
 /** Deterministic route priority for same-backend rows: local is definitionally
  * this box; ssh beats HTTP remotes; cloud last. */
-const CANONICAL_KIND_PRIORITY: Record<ConnectionKind, number> = { cloud: 3, local: 0, remote: 2, ssh: 1 }
+const CANONICAL_KIND_PRIORITY: Record<ConnectionKind, number> = {
+  cloud: 3,
+  local: 0,
+  remote: 2,
+  ssh: 1,
+  'ssh-attach': 1
+}
 
 /**
  * Which connection represents a collapsed same-backend roster row: the ACTIVE
@@ -963,7 +980,7 @@ export function normalizeConnectionInput(input: ConnectionInput, registry: Conne
       registry.connections.map(c => c.id)
     )
 
-  if (kind === 'ssh') {
+  if (kind === 'ssh' || kind === 'ssh-attach') {
     const ssh = normalizeSshConfig({
       mode: 'ssh',
       host: input.host,
@@ -986,13 +1003,15 @@ export function normalizeConnectionInput(input: ConnectionInput, registry: Conne
     const sshKey = (c: { host?: string; port?: number; remoteProfile?: string; user?: string }) =>
       `${(c.user || '').toLowerCase()}@${(c.host || '').toLowerCase()}:${c.port ?? 22}::${(c.remoteProfile || '').trim()}`
 
-    const sshDupe = registry.connections.find(c => c.kind === 'ssh' && c.id !== id && sshKey(c) === sshKey(sshFields))
+    const sshDupe = registry.connections.find(
+      c => (c.kind === 'ssh' || c.kind === 'ssh-attach') && c.id !== id && sshKey(c) === sshKey(sshFields)
+    )
 
     if (sshDupe) {
       throw new Error(`A connection to this SSH host already exists ("${sshDupe.label}").`)
     }
 
-    const entry: RegistryConnection = { id, kind: 'ssh', label, ...sshFields }
+    const entry: RegistryConnection = { id, kind, label, ...sshFields }
 
     // Carry the adopted session-token envelope across edits (mirrors the remote
     // branch): dropping it made a label rename wipe the backend's reuse
@@ -1231,7 +1250,7 @@ export function normalizeRegistry(raw: unknown): ConnectionRegistry {
       const entry = item as Record<string, unknown>
       const kind = entry.kind
 
-      if (kind !== 'local' && kind !== 'remote' && kind !== 'cloud' && kind !== 'ssh') {
+      if (kind !== 'local' && kind !== 'remote' && kind !== 'cloud' && kind !== 'ssh' && kind !== 'ssh-attach') {
         quarantine('entry-unrecognized-kind', item)
 
         continue
@@ -1243,7 +1262,9 @@ export function normalizeRegistry(raw: unknown): ConnectionRegistry {
         // Defensive: registry entries are always written with labels, but a
         // hand-edited file may drop one. Derive rather than discard.
         label =
-          kind === 'ssh' ? String(entry.host || 'ssh') : hostLabelFromBaseUrl(String(entry.url || '')) || String(kind)
+          kind === 'ssh' || kind === 'ssh-attach'
+            ? String(entry.host || 'ssh')
+            : hostLabelFromBaseUrl(String(entry.url || '')) || String(kind)
       }
 
       label = uniqueLabel(label, seenLabels)
@@ -1296,7 +1317,7 @@ export function normalizeRegistry(raw: unknown): ConnectionRegistry {
         if (kind === 'cloud' && org) {
           clean.org = org
         }
-      } else if (kind === 'ssh') {
+      } else if (kind === 'ssh' || kind === 'ssh-attach') {
         const ssh = normalizeSshConfig({ ...entry, mode: 'ssh' })
 
         if (!ssh) {
@@ -1671,7 +1692,7 @@ export function reconcileRegistryDrift(
 
     const alreadyRegistered = registry.connections.some(
       connection =>
-        connection.kind === 'ssh' &&
+        (connection.kind === 'ssh' || connection.kind === 'ssh-attach') &&
         normalizedSshTarget(connection) === target &&
         (connection.port ?? 22) === (ssh.port ?? 22)
     )

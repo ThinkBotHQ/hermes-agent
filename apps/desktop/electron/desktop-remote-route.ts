@@ -39,6 +39,14 @@ export type DesktopRemoteRoute =
       ssh: SshRouteConfig
       token?: unknown
     }
+  | {
+      // HX-1: attach to a host-supervised backend; never spawned or reaped by the desktop.
+      connectionId?: string
+      kind: 'ssh-attach'
+      source: Exclude<RouteSource, 'env'>
+      ssh: SshRouteConfig
+      token?: unknown
+    }
 
 export interface DesktopRemoteRouteInput {
   config: Record<string, any>
@@ -195,14 +203,16 @@ function resolveRegistryPrimaryRoute(registry: ConnectionRegistry): DesktopRemot
     return null
   }
 
-  if (entry.kind === 'ssh') {
+  if (entry.kind === 'ssh' || entry.kind === 'ssh-attach') {
     const ssh = normalizeSshConfig({ ...entry, mode: 'ssh' })
 
     if (!ssh) {
       return null
     }
 
-    return { connectionId: entry.id, kind: 'ssh', source: 'registry', ssh, token: entry.token }
+    return entry.kind === 'ssh-attach'
+      ? { connectionId: entry.id, kind: 'ssh-attach', source: 'registry', ssh, token: entry.token }
+      : { connectionId: entry.id, kind: 'ssh', source: 'registry', ssh, token: entry.token }
   }
 
   if (entry.kind !== 'remote' && entry.kind !== 'cloud') {

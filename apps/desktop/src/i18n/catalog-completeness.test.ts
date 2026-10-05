@@ -49,6 +49,19 @@ it.each(['de', 'es', 'fr', 'ja', 'ru', 'zh', 'zh-hant', 'ar'] as const)(
   }
 )
 
+it.each(['en', 'de', 'es', 'fr', 'ja', 'ru', 'zh', 'zh-hant', 'ar'] as const)(
+  '%s defines non-empty ssh-attach connection keys',
+  locale => {
+    const connections = TRANSLATIONS[locale].settings?.connections as Record<string, unknown> | undefined
+    expect(connections?.kindSshAttach).toBeTypeOf('string')
+    expect(connections?.kindSshAttach).not.toBe('')
+    expect(connections?.kindSshAttachShort).toBeTypeOf('string')
+    expect(connections?.kindSshAttachShort).not.toBe('')
+    expect(connections?.kindSshAttachDesc).toBeTypeOf('string')
+    expect(connections?.kindSshAttachDesc).not.toBe('')
+  }
+)
+
 describe.each(COMPLETE_LOCALES)('%s desktop catalog', locale => {
   const catalog = catalogLeaves(locale)
 

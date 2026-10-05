@@ -1176,6 +1176,10 @@ export const ru = defineLocale({
       kindRemoteDesc: 'Шлюз Hermes, доступный по HTTP(S) — LAN, Tailscale или интернет.',
       kindCloudDesc: 'Хостинговая инстанция, обнаруженная через ваш аккаунт Hermes Cloud.',
       kindSshDesc: 'Установка Hermes, доступная по SSH.',
+      kindSshAttach: 'SSH (подключение к бэкенду хоста)',
+      kindSshAttachShort: 'SSH (подключение)',
+      kindSshAttachDesc:
+        'Хост выполняет hermes serve под управлением собственного супервизора; десктопное приложение никогда не запускает и не останавливает его.',
       labelTitle: 'Имя',
       labelDesc:
         'Обязательно. Показывается везде, где фигурирует эта инстанция; должно быть уникальным (напр. «Домашняя лаборатория», «Рабочий ноутбук»).',

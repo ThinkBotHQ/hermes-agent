@@ -1440,7 +1440,8 @@ test('normalizeRegistry round-trips a valid registry unchanged in shape', () => 
         authMode: 'oauth',
         org: 'nous'
       },
-      { id: 'spark', kind: 'ssh', label: 'Spark', host: 'spark1', user: 'tek', port: 2222 }
+      { id: 'spark', kind: 'ssh', label: 'Spark', host: 'spark1', user: 'tek', port: 2222 },
+      { id: 'attach-box', kind: 'ssh-attach', label: 'Attach Box', host: 'box1', user: 'tek', port: 22 }
     ]
   }
 
@@ -1449,13 +1450,15 @@ test('normalizeRegistry round-trips a valid registry unchanged in shape', () => 
   assert.equal(registry.primary, 'homelab')
   assert.equal(registry.launchMode, 'last-used')
   assert.equal(registry.lastUsed, 'homelab')
-  assert.equal(registry.connections.length, 4)
+  assert.equal(registry.connections.length, 5)
   assert.deepEqual(
     registry.connections.map(c => c.id),
-    ['local', 'homelab', 'cloud-1', 'spark']
+    ['local', 'homelab', 'cloud-1', 'spark', 'attach-box']
   )
   assert.deepEqual(registry.connections[1].token, { v: 1 })
   assert.equal(registry.connections[3].port, 2222)
+  assert.equal(registry.connections[4].kind, 'ssh-attach')
+  assert.equal(registry.connections[4].host, 'box1')
 })
 
 test('normalizeRegistry falls back to Primary when the last-used source is missing', () => {

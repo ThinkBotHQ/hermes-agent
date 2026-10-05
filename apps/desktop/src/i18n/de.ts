@@ -1755,6 +1755,10 @@ export const deOverrides = {
       kindRemoteDesc: 'Ein Hermes Gateway, das über HTTP(S) erreichbar ist – LAN, Tailscale oder das Internet.',
       kindCloudDesc: 'Eine gehostete Instanz, die über Ihr Hermes-Cloud-Konto gefunden wurde.',
       kindSshDesc: 'Eine Hermes-Installation, die über SSH erreicht wird.',
+      kindSshAttach: 'SSH (an Host-Backend anhängen)',
+      kindSshAttachShort: 'SSH (Anhängen)',
+      kindSshAttachDesc:
+        'Der Host führt hermes serve unter seinem eigenen Supervisor aus; die Desktop-App startet oder stoppt ihn nie.',
       labelTitle: 'Name',
       labelDesc:
         'Pflichtfeld. Wird überall angezeigt, wo diese Instanz erscheint; muss eindeutig sein (z. B. „Homelab“, „Arbeitslaptop“).',
