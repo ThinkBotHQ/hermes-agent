@@ -15,6 +15,7 @@ and silently re-arm metered billing behind `allow_metered_key: false`.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -276,6 +277,72 @@ def test_interpreter_scrub_is_independent_of_the_metered_opt_in(env_config, monk
     monkeypatch.setenv("PYTHONPATH", "/repo/.venv/lib/python3.11/site-packages")
 
     assert M._sdk_env_overrides()["PYTHONPATH"] == ""
+
+
+# ── npm environment hygiene ───────────────────────────────────────────────────
+# The desktop app is launched by `npm run`, so npm_config_* and npm_package_*
+# describe the live checkout and are stale for anything an agent runs (same list
+# as apps/desktop/electron/terminal-ipc.ts). This is hygiene, not a fix for a
+# known failure.
+
+
+def test_npm_vars_are_blanked_when_present_in_parent_env(env_config, monkeypatch):
+    """(a) with npm_config_local_prefix, npm_config_prefix and npm_package_name set
+    in the parent env, the env overrides handed to the SDK map each of them to ""."""
+    env_config(env=None)
+    monkeypatch.setenv("npm_config_local_prefix", "/workspace/repo")
+    monkeypatch.setenv("npm_config_prefix", "/usr/local")
+    monkeypatch.setenv("npm_package_name", "hermes-desktop")
+
+    overrides = M._sdk_env_overrides()
+
+    assert overrides["npm_config_local_prefix"] == ""
+    assert overrides["npm_config_prefix"] == ""
+    assert overrides["npm_package_name"] == ""
+
+
+def test_absent_npm_vars_yield_no_npm_keys_in_overrides(env_config, monkeypatch):
+    """(b) a parent env with none of them yields no npm keys in the overrides."""
+    env_config(env=None)
+    for key in list(os.environ):
+        if key == "npm_config_prefix" or key.startswith(("npm_config_", "npm_package_")):
+            monkeypatch.delenv(key, raising=False)
+
+    overrides = M._sdk_env_overrides()
+
+    npm_keys = [
+        k for k in overrides
+        if k == "npm_config_prefix" or k.startswith(("npm_config_", "npm_package_"))
+    ]
+    assert npm_keys == []
+
+
+def test_unrelated_keys_are_not_overridden_by_npm_scrub(env_config, monkeypatch):
+    """(c) unrelated keys (e.g. PATH, NPM_TOKEN in upper case, INIT_CWD) are NOT overridden."""
+    env_config(env=None)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("NPM_TOKEN", "secret-npm-token")
+    monkeypatch.setenv("INIT_CWD", "/workspace/repo")
+
+    overrides = M._sdk_env_overrides()
+
+    assert "PATH" not in overrides
+    assert "NPM_TOKEN" not in overrides
+    assert "INIT_CWD" not in overrides
+
+
+def test_existing_interpreter_scrub_still_behaves_as_before(env_config, monkeypatch):
+    """(d) the existing PYTHONPATH/PYTHONHOME scrub still behaves as before."""
+    env_config(env=None)
+    monkeypatch.setenv("PYTHONPATH", "/repo:/repo/.venv/lib/python3.11/site-packages")
+    monkeypatch.setenv("PYTHONHOME", "/repo/.venv")
+    monkeypatch.setenv("npm_config_prefix", "/usr/local")
+
+    overrides = M._sdk_env_overrides()
+
+    assert overrides["PYTHONPATH"] == ""
+    assert overrides["PYTHONHOME"] == ""
+    assert overrides["npm_config_prefix"] == ""
 
 
 def test_nested_in_claude_child_masks_the_parent_task_list(env_config, monkeypatch):

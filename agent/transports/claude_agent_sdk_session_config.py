@@ -100,7 +100,8 @@ def _sdk_env_overrides(
     """The full env override set handed to the spawned CLI.
 
     Metered-vector scrub first (see _METERED_ENV_DENYLIST), then the
-    interpreter-path scrub (see _CHILD_INTERPRETER_ENV_DENYLIST).
+    interpreter-path scrub (see _CHILD_INTERPRETER_ENV_DENYLIST) and npm
+    environment hygiene (see _scrubbed_npm_env).
     agent.claude_agent_sdk.allow_metered_key: true is the operator's explicit
     "bill me metered" opt-in (the same flag the startup guard honors), so it
     disables the scrub too — otherwise the documented escape hatch would hand
@@ -119,6 +120,8 @@ def _sdk_env_overrides(
     # before the operator env so a deliberate ``env: {PYTHONPATH: ...}`` in
     # config.yaml still wins — that is a knob, not a billing vector.
     overrides.update(_scrubbed_interpreter_env())
+    # npm environment hygiene (see apps/desktop/electron/terminal-ipc.ts).
+    overrides.update(_scrubbed_npm_env())
     # A caller that already resolved the task env for this conversation passes
     # it in, so a rebuilt child gets byte-identical task variables.
     overrides.update(
@@ -1131,6 +1134,24 @@ def _scrubbed_interpreter_env() -> dict[str, str]:
         key: ""
         for key in _CHILD_INTERPRETER_ENV_DENYLIST
         if os.environ.get(key)
+    }
+
+
+# The desktop app is launched by `npm run`, so its npm_config_* / npm_package_*
+# describe the live checkout and are stale for anything an agent runs (same list
+# as apps/desktop/electron/terminal-ipc.ts). This is hygiene, not a fix for a
+# known failure.
+_CHILD_NPM_ENV_PREFIXES = ("npm_config_", "npm_package_")
+
+
+def _scrubbed_npm_env() -> dict[str, str]:
+    """Empty-string overrides for npm variables inherited from `npm run`. Only
+    PRESENT keys are overridden; "" is how the SDK's ``{**os.environ,
+    **options.env}`` merge neutralises an inherited key."""
+    return {
+        key: ""
+        for key in list(os.environ)
+        if key == "npm_config_prefix" or key.startswith(_CHILD_NPM_ENV_PREFIXES)
     }
 
 
