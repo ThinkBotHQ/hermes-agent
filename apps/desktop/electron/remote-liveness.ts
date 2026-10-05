@@ -20,8 +20,36 @@ export interface RemoteLivenessFailure {
 }
 
 interface RemoteConnectionDescriptor {
+  attachOnly?: boolean
   baseUrl?: null | string
   mode?: null | string
+}
+
+const ATTACH_REATTACH_FAILURE = Symbol('attach-reattach-failure')
+
+function isAttachReattachFailure(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && (error as any)[ATTACH_REATTACH_FAILURE])
+}
+
+function isCredentialRejected(error: unknown): boolean {
+  const statusCode = Number(error && typeof error === 'object' ? (error as { statusCode?: unknown }).statusCode : NaN)
+
+  return statusCode === 401 || statusCode === 403
+}
+
+async function reattachAfterCredentialRejection<T>(
+  reattach: (...args: any[]) => Promise<T>,
+  ...args: any[]
+): Promise<T> {
+  try {
+    return await reattach(...args)
+  } catch (error) {
+    if (error && typeof error === 'object') {
+      Object.defineProperty(error, ATTACH_REATTACH_FAILURE, { value: true })
+    }
+
+    throw error
+  }
 }
 
 export interface RevalidateRemoteConnectionOptions<TConnection extends RemoteConnectionDescriptor> {
@@ -31,6 +59,8 @@ export interface RevalidateRemoteConnectionOptions<TConnection extends RemoteCon
   probe: (connection: TConnection, path: string, options: { timeoutMs: number }) => Promise<unknown>
   resetConnection: () => void
   tracker: RemoteLivenessTracker
+  reattach?: (connection: TConnection) => Promise<TConnection>
+  publish?: (connection: TConnection) => void
 }
 
 export interface RemoteRevalidationResult {
@@ -78,6 +108,7 @@ interface EnsureHealthyPooledRemoteBackendForDispatchOptions<TConnection extends
   probe: (connection: TConnection, path: string, options: { timeoutMs: number }) => Promise<unknown>
   reconnect: () => Promise<TConnection>
   retire: (error: unknown) => Promise<void> | void
+  reattach?: (connection: TConnection) => Promise<TConnection>
 }
 
 /**
@@ -93,7 +124,8 @@ export async function ensureHealthyPooledRemoteBackendForDispatch<TConnection ex
   currentConnectionPromise,
   probe,
   reconnect,
-  retire
+  retire,
+  reattach
 }: EnsureHealthyPooledRemoteBackendForDispatchOptions<TConnection>): Promise<TConnection> {
   let connection: TConnection
 
@@ -105,14 +137,18 @@ export async function ensureHealthyPooledRemoteBackendForDispatch<TConnection ex
     }
 
     try {
-      await probe(connection, '/api/health', {
+      await probe(connection, connection.attachOnly ? '/api/host/identity' : '/api/health', {
         timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS
       })
     } catch (healthError) {
+      if (connection.attachOnly && isCredentialRejected(healthError) && reattach) {
+        return reattach(connection)
+      }
+
       // A remote that predates /api/health would otherwise 404 every dispatch,
       // retire the tunnel and reconnect forever; the boot probe falls back the
       // same way (backend-health.ts).
-      if (!isMissingHealthEndpointError(healthError)) {
+      if (connection.attachOnly || !isMissingHealthEndpointError(healthError)) {
         throw healthError
       }
 
@@ -201,6 +237,7 @@ export interface RevalidatePooledRemoteBackendsOptions<TConnection extends Remot
   probe: (connection: TConnection, path: string, options: { timeoutMs: number }) => Promise<unknown>
   stopBackend: (profile: string) => void
   tracker: RemoteLivenessTracker
+  reattach?: (poolKey: string, connection: TConnection) => Promise<TConnection>
 }
 
 /**
@@ -219,7 +256,8 @@ export async function revalidatePooledRemoteBackends<TConnection extends RemoteC
   log,
   probe,
   stopBackend,
-  tracker
+  tracker,
+  reattach
 }: RevalidatePooledRemoteBackendsOptions<TConnection>): Promise<{ dropped: string[] }> {
   const remotes = [...entries].filter(([, entry]) => !entry.process && entry.remoteBaseUrl)
   const dropped: string[] = []
@@ -234,9 +272,21 @@ export async function revalidatePooledRemoteBackends<TConnection extends RemoteC
         }
 
         const connection = await entry.connectionPromise
-        await probe(connection, '/api/status', { timeoutMs: REMOTE_LIVENESS_TIMEOUT_MS })
+
+        try {
+          await probe(connection, connection.attachOnly ? '/api/host/identity' : '/api/status', {
+            timeoutMs: REMOTE_LIVENESS_TIMEOUT_MS
+          })
+        } catch (error) {
+          if (!connection.attachOnly || !isCredentialRejected(error) || !reattach) {throw error}
+
+          entry.connectionPromise = Promise.resolve(await reattachAfterCredentialRejection(reattach, profile, connection))
+        }
+
         tracker.recordSuccess(baseUrl)
-      } catch {
+      } catch (error) {
+        if (isAttachReattachFailure(error)) {throw error}
+
         const failure = tracker.recordFailure(baseUrl)
 
         if (!failure.shouldReset) {
@@ -266,6 +316,7 @@ export interface RevalidateSuspectPooledRemoteBackendsOptions<TConnection extend
   /** Tear down the dead descriptor (pool entry + SSH tunnel/master) for this key. */
   retire: (poolKey: string) => Promise<void> | void
   tracker: RemoteLivenessTracker
+  reattach?: (poolKey: string, connection: TConnection) => Promise<TConnection>
 }
 
 /**
@@ -293,7 +344,8 @@ export async function revalidateSuspectPooledRemoteBackends<TConnection extends 
   probe,
   rebuild,
   retire,
-  tracker
+  tracker,
+  reattach
 }: RevalidateSuspectPooledRemoteBackendsOptions<TConnection>): Promise<{ rebuilt: string[]; retired: string[] }> {
   const remotes = [...entries].filter(([, entry]) => !entry.process && entry.remoteBaseUrl)
   const rebuilt: string[] = []
@@ -309,11 +361,23 @@ export async function revalidateSuspectPooledRemoteBackends<TConnection extends 
         }
 
         const connection = await entry.connectionPromise
-        await probe(connection, '/api/status', { timeoutMs: REMOTE_LIVENESS_TIMEOUT_MS })
+
+        try {
+          await probe(connection, connection.attachOnly ? '/api/host/identity' : '/api/status', {
+            timeoutMs: REMOTE_LIVENESS_TIMEOUT_MS
+          })
+        } catch (error) {
+          if (!connection.attachOnly || !isCredentialRejected(error) || !reattach) {throw error}
+
+          entry.connectionPromise = Promise.resolve(await reattachAfterCredentialRejection(reattach, poolKey, connection))
+        }
+
         tracker.recordSuccess(baseUrl)
 
         return
       } catch (probeError) {
+        if (isAttachReattachFailure(probeError)) {throw probeError}
+
         log(
           `Pooled remote backend "${poolKey}" failed its post-resume probe (${probeError instanceof Error ? probeError.message : String(probeError)}); rebuilding tunnel.`
         )
@@ -421,7 +485,9 @@ export async function revalidateRemoteConnection<TConnection extends RemoteConne
   log,
   probe,
   resetConnection,
-  tracker
+  tracker,
+  reattach,
+  publish
 }: RevalidateRemoteConnectionOptions<TConnection>): Promise<RemoteRevalidationResult> {
   let connection: TConnection
 
@@ -443,7 +509,22 @@ export async function revalidateRemoteConnection<TConnection extends RemoteConne
   const baseUrl = connection.baseUrl.replace(/\/+$/, '')
 
   try {
-    await probe(connection, '/api/status', { timeoutMs: REMOTE_LIVENESS_TIMEOUT_MS })
+    try {
+      await probe(connection, connection.attachOnly ? '/api/host/identity' : '/api/status', {
+        timeoutMs: REMOTE_LIVENESS_TIMEOUT_MS
+      })
+    } catch (error) {
+      if (!connection.attachOnly || !isCredentialRejected(error) || !reattach) {throw error}
+
+      const replacement = await reattachAfterCredentialRejection(reattach, connection)
+
+      if (currentConnectionPromise() !== connectionPromise) {return { ok: true, rebuilt: false }}
+
+      tracker.recordSuccess(baseUrl)
+      publish?.(replacement)
+
+      return { ok: true, rebuilt: false }
+    }
 
     if (currentConnectionPromise() !== connectionPromise) {
       return { ok: true, rebuilt: false }
@@ -452,7 +533,9 @@ export async function revalidateRemoteConnection<TConnection extends RemoteConne
     tracker.recordSuccess(baseUrl)
 
     return { ok: true, rebuilt: false }
-  } catch {
+  } catch (error) {
+    if (isAttachReattachFailure(error)) {throw error}
+
     if (currentConnectionPromise() !== connectionPromise) {
       return { ok: true, rebuilt: false }
     }

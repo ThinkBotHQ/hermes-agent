@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import crypto from 'node:crypto'
 
 import { describe, test } from 'vitest'
 
@@ -9,6 +8,7 @@ import {
   AttachNoBackendError,
   AttachTokenMismatchError,
   detach,
+  reattach,
   tokenFingerprint
 } from './ssh-attach-lifecycle'
 
@@ -25,14 +25,19 @@ function fakeSsh(
     cancelledForwards,
     async exec(cmd: string) {
       calls.push(cmd)
+
       for (const [matcher, resp] of rules) {
         const hit = typeof matcher === 'function' ? matcher(cmd) : matcher.test(cmd)
+
         if (hit) {
           const out = typeof resp === 'function' ? resp(cmd) : resp
-          if (out instanceof Error) throw out
+
+          if (out instanceof Error) {throw out}
+
           return out
         }
       }
+
       return ''
     },
     async forward(localPort: number, remotePort: number, remoteHost = '127.0.0.1') {
@@ -46,6 +51,7 @@ function fakeSsh(
 
 function makeHostRecord(over: Record<string, any> = {}) {
   const token = typeof over.token === 'string' ? over.token : 'test-session-token-xyz'
+
   const record: Record<string, any> = {
     role: 'serve',
     pid: 12345,
@@ -58,13 +64,16 @@ function makeHostRecord(over: Record<string, any> = {}) {
     updatedAt: '2026-09-28T00:00:00Z',
     ...over
   }
+
   delete record.token
+
   return { record, token }
 }
 
 describe('ssh-attach-lifecycle', () => {
   test('(a) happy path returns baseUrl/token and calls forward with record.port', async () => {
     const { record, token } = makeHostRecord()
+
     const ssh = fakeSsh([
       [/host-serve/, `${JSON.stringify(record)}\n__HERMES_ATTACH_DELIM__\n${token}`]
     ])
@@ -78,12 +87,14 @@ describe('ssh-attach-lifecycle', () => {
       },
       fetchFn: async (url: string | URL | Request) => {
         const urlStr = String(url)
+
         if (urlStr.endsWith('/api/host/identity')) {
           return new Response(JSON.stringify({ pid: record.pid, role: 'serve' }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' }
           })
         }
+
         return new Response('Not found', { status: 404 })
       }
     })
@@ -116,6 +127,7 @@ describe('ssh-attach-lifecycle', () => {
           assert.ok(err instanceof AttachNoBackendError)
           assert.equal(err.kind, 'attach-no-backend')
           assert.match(err.message, /supervisor|missing|running/i)
+
           return true
         }
       )
@@ -126,6 +138,7 @@ describe('ssh-attach-lifecycle', () => {
 
   test('(b-2) role is desktop-serve or not serve throws AttachNoBackendError and opens no forward', async () => {
     const { record, token } = makeHostRecord({ role: 'desktop-serve' })
+
     const ssh = fakeSsh([
       [/host-serve/, `${JSON.stringify(record)}\n__HERMES_ATTACH_DELIM__\n${token}`]
     ])
@@ -138,6 +151,7 @@ describe('ssh-attach-lifecycle', () => {
       (err: any) => {
         assert.ok(err instanceof AttachNoBackendError)
         assert.equal(err.kind, 'attach-no-backend')
+
         return true
       }
     )
@@ -148,6 +162,7 @@ describe('ssh-attach-lifecycle', () => {
   test('(c) fingerprint mismatch throws AttachTokenMismatchError and opens no forward', async () => {
     const { record } = makeHostRecord({ tokenFingerprint: '0123456789abcdef' })
     const differentToken = 'a-different-token-whose-hash-wont-match'
+
     const ssh = fakeSsh([
       [/host-serve/, `${JSON.stringify(record)}\n__HERMES_ATTACH_DELIM__\n${differentToken}`]
     ])
@@ -160,6 +175,7 @@ describe('ssh-attach-lifecycle', () => {
       (err: any) => {
         assert.ok(err instanceof AttachTokenMismatchError)
         assert.equal(err.kind, 'attach-token-mismatch')
+
         return true
       }
     )
@@ -169,6 +185,7 @@ describe('ssh-attach-lifecycle', () => {
 
   test('(d) identity pid mismatch throws AttachIdentityError and forward is cancelled', async () => {
     const { record, token } = makeHostRecord({ pid: 12345 })
+
     const ssh = fakeSsh([
       [/host-serve/, `${JSON.stringify(record)}\n__HERMES_ATTACH_DELIM__\n${token}`]
     ])
@@ -179,6 +196,7 @@ describe('ssh-attach-lifecycle', () => {
           pickLocalPort: async () => 50001,
           fetchFn: async (url: string | URL | Request) => {
             const urlStr = String(url)
+
             if (urlStr.endsWith('/api/host/identity')) {
               // Returning different PID 99999
               return new Response(JSON.stringify({ pid: 99999, role: 'serve' }), {
@@ -186,12 +204,14 @@ describe('ssh-attach-lifecycle', () => {
                 headers: { 'Content-Type': 'application/json' }
               })
             }
+
             return new Response('Not found', { status: 404 })
           }
         }),
       (err: any) => {
         assert.ok(err instanceof AttachIdentityError)
         assert.equal(err.kind, 'attach-identity-error')
+
         return true
       }
     )
@@ -213,5 +233,33 @@ describe('ssh-attach-lifecycle', () => {
       !ssh.calls.some(cmd => /kill|pkill/.test(cmd)),
       'detach must issue NO exec containing kill or pkill'
     )
+  })
+
+  test('(f) reattach cancels the prior forward, rereads rendezvous, and only opens the replacement forward', async () => {
+    const { record, token } = makeHostRecord({ token: 'token-B' })
+
+    const ssh = fakeSsh([
+      [/host-serve/, `${JSON.stringify(record)}\n__HERMES_ATTACH_DELIM__\n${token}`]
+    ])
+
+    const replacement = await reattach(ssh, { localPort: 50001, remotePort: 54321 }, {
+      pickLocalPort: async () => 50002,
+      fetchFn: async () => new Response(JSON.stringify({ pid: record.pid }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    })
+
+    assert.equal(replacement.token, token)
+    assert.equal(replacement.localPort, 50002)
+    assert.deepEqual(ssh.cancelledForwards, [
+      { localPort: 50001, remotePort: 54321, remoteHost: '127.0.0.1' }
+    ])
+    assert.deepEqual(ssh.forwards, [
+      { localPort: 50002, remotePort: record.port, remoteHost: '127.0.0.1' }
+    ])
+    assert.equal(ssh.calls.length, 1, 'reattach may only execute the rendezvous file read')
+    assert.match(ssh.calls[0], /cat "\$lockdir\/host-serve\.json"/)
+    assert.doesNotMatch(ssh.calls[0], /\b(kill|pkill|spawn)\b/i)
   })
 })

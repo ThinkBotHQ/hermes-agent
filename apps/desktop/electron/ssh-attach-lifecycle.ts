@@ -54,6 +54,7 @@ export function tokenFingerprint(token: string): string {
   if (!token) {
     return ''
   }
+
   return crypto.createHash('sha256').update(token, 'utf8').digest('hex').slice(0, 16)
 }
 
@@ -61,7 +62,7 @@ const ATTACH_DELIM = '__HERMES_ATTACH_DELIM__'
 const ATTACH_MISSING = '__HERMES_ATTACH_MISSING__'
 
 const READ_HOST_SERVE_CMD =
-  `lockdir="\${HERMES_GATEWAY_LOCK_DIR:-\${XDG_STATE_HOME:-\$HOME/.local/state}/hermes/gateway-locks}"\n` +
+  `lockdir="\${HERMES_GATEWAY_LOCK_DIR:-\${XDG_STATE_HOME:-$HOME/.local/state}/hermes/gateway-locks}"\n` +
   `if [ ! -f "$lockdir/host-serve.json" ] || [ ! -f "$lockdir/host-serve.token" ]; then\n` +
   `  echo "${ATTACH_MISSING}"\n` +
   `  exit 0\n` +
@@ -94,6 +95,7 @@ export interface AttachResult {
 
 export async function attach(ssh: AttachSshConnection, opts: AttachOptions = {}): Promise<AttachResult> {
   let output = ''
+
   try {
     output = await ssh.exec(READ_HOST_SERVE_CMD)
   } catch (error: any) {
@@ -103,6 +105,7 @@ export async function attach(ssh: AttachSshConnection, opts: AttachOptions = {})
   }
 
   const trimmed = output.trim()
+
   if (!trimmed || trimmed.includes(ATTACH_MISSING) || !trimmed.includes(ATTACH_DELIM)) {
     throw new AttachNoBackendError(
       'Host supervisor is not running hermes serve (host-serve.json or host-serve.token missing)'
@@ -120,6 +123,7 @@ export async function attach(ssh: AttachSshConnection, opts: AttachOptions = {})
   }
 
   let record: any
+
   try {
     record = JSON.parse(rawJson)
   } catch {
@@ -160,6 +164,7 @@ export async function attach(ssh: AttachSshConnection, opts: AttachOptions = {})
 
   try {
     const fetchFn = opts.fetchFn || fetch
+
     const response = await fetchFn(`${baseUrl}/api/host/identity`, {
       method: 'GET',
       headers: {
@@ -175,6 +180,7 @@ export async function attach(ssh: AttachSshConnection, opts: AttachOptions = {})
     }
 
     const identity = (await response.json()) as any
+
     if (!identity || typeof identity !== 'object' || identity.pid !== pid) {
       throw new Error(`Identity PID mismatch: expected ${pid}, got ${identity?.pid}`)
     }
@@ -184,6 +190,7 @@ export async function attach(ssh: AttachSshConnection, opts: AttachOptions = {})
     } catch {
       // Best-effort forward cleanup on probe failure
     }
+
     throw new AttachIdentityError(
       `Host identity probe failed or PID does not match: ${err instanceof Error ? err.message : String(err)}`
     )
@@ -210,4 +217,14 @@ export async function detach(
   if (handle?.localPort && handle?.remotePort) {
     await ssh.cancelForward(handle.localPort, handle.remotePort)
   }
+}
+
+export async function reattach(
+  ssh: AttachSshConnection,
+  handle: { localPort: number; remotePort: number },
+  opts: AttachOptions = {}
+): Promise<AttachResult> {
+  await detach(ssh, handle)
+
+  return attach(ssh, opts)
 }

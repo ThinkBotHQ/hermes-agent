@@ -192,6 +192,62 @@ describe('revalidateRemoteConnection', () => {
     expect(test.resetConnection).not.toHaveBeenCalled()
   })
 
+  it('reauthenticates attach-only descriptors once after a rejected token and uses the replacement next pass', async () => {
+    const tokenA = { baseUrl: 'http://127.0.0.1:51001', mode: 'remote', attachOnly: true, token: 'A' }
+    const tokenB = { ...tokenA, baseUrl: 'http://127.0.0.1:51002', token: 'B' }
+    let currentPromise = Promise.resolve(tokenA)
+    let published: typeof tokenB | null = null
+
+    const probe = vi.fn(async (connection: typeof tokenA | typeof tokenB) => {
+      if (connection.token === 'A') {throw Object.assign(new Error('401'), { statusCode: 401 })}
+    })
+
+    const reattach = vi.fn().mockResolvedValue(tokenB)
+
+    const options = {
+      connectionPromise: currentPromise,
+      currentConnectionPromise: () => currentPromise,
+      log: vi.fn(),
+      probe,
+      resetConnection: vi.fn(),
+      tracker: new RemoteLivenessTracker(),
+      reattach,
+      publish: (connection: typeof tokenB) => {
+        published = connection
+      }
+    }
+
+    const first = await revalidateRemoteConnection(options)
+    expect(first).toEqual({ ok: true, rebuilt: false })
+    expect(published).toBe(tokenB)
+    expect(reattach).toHaveBeenCalledOnce()
+    expect(probe).toHaveBeenCalledWith(tokenA, '/api/host/identity', { timeoutMs: REMOTE_LIVENESS_TIMEOUT_MS })
+
+    currentPromise = Promise.resolve(published!)
+    options.connectionPromise = currentPromise
+    await expect(revalidateRemoteConnection(options)).resolves.toEqual({ ok: true, rebuilt: false })
+    expect(probe).toHaveBeenLastCalledWith(tokenB, '/api/host/identity', { timeoutMs: REMOTE_LIVENESS_TIMEOUT_MS })
+    expect(reattach).toHaveBeenCalledOnce()
+  })
+
+  it('surfaces attach-only reattach errors after one bounded attempt', async () => {
+    const connection = { baseUrl: 'http://127.0.0.1:51001', mode: 'remote', attachOnly: true, token: 'A' }
+    const connectionPromise = Promise.resolve(connection)
+    const attachError = Object.assign(new Error('rendezvous missing'), { kind: 'attach-no-backend' })
+    const reattach = vi.fn().mockRejectedValue(attachError)
+
+    const test = harness({
+      connectionPromise,
+      currentConnectionPromise: () => connectionPromise,
+      probe: vi.fn().mockRejectedValue(Object.assign(new Error('401'), { statusCode: 401 })),
+      reattach
+    })
+
+    await expect(revalidateRemoteConnection(test.options)).rejects.toBe(attachError)
+    expect(reattach).toHaveBeenCalledOnce()
+    expect(test.resetConnection).not.toHaveBeenCalled()
+  })
+
   it('keeps failures one and two, then resets on the third failure', async () => {
     const probe = vi.fn().mockRejectedValue(new Error('offline'))
     const test = harness({ probe })
@@ -287,6 +343,34 @@ describe('ensureHealthyPooledRemoteBackendForDispatch', () => {
     expect(probe).toHaveBeenCalledWith(healthy, '/api/health', {
       timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS
     })
+    expect(retire).not.toHaveBeenCalled()
+    expect(reconnect).not.toHaveBeenCalled()
+  })
+
+  it('reattaches an attach-only pooled descriptor on authenticated dispatch rejection', async () => {
+    const stale = { baseUrl: 'http://127.0.0.1:49525', mode: 'remote', attachOnly: true, token: 'A' }
+    const replacement = { ...stale, baseUrl: 'http://127.0.0.1:53968', token: 'B' }
+    const connectionPromise = Promise.resolve(stale)
+    const probe = vi.fn().mockRejectedValue(Object.assign(new Error('403'), { statusCode: 403 }))
+    const reattach = vi.fn().mockResolvedValue(replacement)
+    const retire = vi.fn()
+    const reconnect = vi.fn()
+
+    await expect(
+      ensureHealthyPooledRemoteBackendForDispatch({
+        connectionPromise,
+        currentConnectionPromise: () => connectionPromise,
+        probe,
+        reconnect,
+        retire,
+        reattach
+      })
+    ).resolves.toBe(replacement)
+
+    expect(probe).toHaveBeenCalledWith(stale, '/api/host/identity', {
+      timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS
+    })
+    expect(reattach).toHaveBeenCalledOnce()
     expect(retire).not.toHaveBeenCalled()
     expect(reconnect).not.toHaveBeenCalled()
   })

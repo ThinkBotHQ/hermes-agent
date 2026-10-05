@@ -459,7 +459,6 @@ import { createQuitFinalization } from './quit-finalization'
 import { type ActiveWork, backendOwnedByApp, mergeActiveWork, normalizeActiveWork, quitPromptFor } from './quit-guard'
 import { backendQuitNeedsWait, createQuitTeardownCoordinator, type QuitTeardownTask } from './quit-teardown'
 import * as remoteLifecycle from './remote-lifecycle'
-import * as sshAttach from './ssh-attach-lifecycle'
 import {
   attachPowerResumeRemoteRevalidation,
   ensureHealthyPooledRemoteBackendForDispatch,
@@ -504,6 +503,7 @@ import {
 import { ensureLoginShellPath } from './shell-path'
 import { watchSmokeMainWindow } from './smoke-launch-guard'
 import { createSourcePythonBackend, resolveSourceInstallationBackend, type SourceBackend } from './source-backend'
+import * as sshAttach from './ssh-attach-lifecycle'
 import { createBootstrapCoordinator, sshConfigFingerprint } from './ssh-bootstrap-coordinator'
 import { collectSshConfigHosts, parseSshGOutput } from './ssh-config'
 import { createSshProbeConnection, pickLocalPort, redactSecrets, SshConnection } from './ssh-connection'
@@ -10149,7 +10149,7 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
       `${result.hermesVersion || 'hermes (version unknown)'} at ${result.hermesPath || '?'}`
   )
 
-  const connection = await buildRemoteConnection(
+  const connection: any = await buildRemoteConnection(
     result.baseUrl,
     'token',
     result.token,
@@ -10158,6 +10158,10 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
     'ssh',
     result.ownershipId
   )
+
+  if (result.attachOnly) {
+    connection.attachOnly = true
+  }
 
   return {
     ...connection,
@@ -11105,6 +11109,15 @@ async function ensureRegistryBackend(
         currentConnectionPromise: () => backendPool.get(key)?.connectionPromise || null,
         probe: (connection, requestPath, options) => fetchJsonForBackend(connection, requestPath, options),
         reconnect: () => ensureRegistryBackend(id, profile, '', { passive }),
+        reattach: async connection => {
+          const replacement = await reattachAttachOnlyConnection(connection, key)
+
+          if (backendPool.get(key) === existing && existing.connectionPromise === connectionPromise) {
+            existing.connectionPromise = Promise.resolve(replacement)
+          }
+
+          return replacement
+        },
         retire: async (error: any) => {
           // A late failure from an old descriptor must never tear down a newer
           // entry that another caller has already installed.
@@ -15101,6 +15114,12 @@ ipcMain.handle('hermes:connection:revalidate', async () => {
         log: rememberLog,
         probe: (connection, path, options) => fetchJsonForBackend(connection, path, options),
         resetConnection: () => resetHermesConnectionState({ soft: true }),
+        reattach: connection => reattachAttachOnlyConnection(connection),
+        publish: connection => {
+          const nextPromise = Promise.resolve(connection)
+          const attempt = backendConnectionState.startAttempt()
+          backendConnectionState.setPromise(attempt, nextPromise)
+        },
         tracker: remoteLiveness
       }),
       revalidatePool()
@@ -15132,7 +15151,66 @@ function revalidatePool() {
     log: rememberLog,
     probe: (connection, path, options) => fetchJsonForBackend(connection, path, options),
     stopBackend: stopPoolBackend,
-    tracker: remoteLiveness
+    tracker: remoteLiveness,
+    reattach: (poolKey, connection) => reattachAttachOnlyConnection(connection, poolKey)
+  })
+}
+
+async function reattachAttachOnlyConnection(connection, poolKey?: string) {
+  if (!connection?.attachOnly) {
+    throw new Error('Cannot reattach a non-attach-only connection.')
+  }
+
+  return remoteRevalidation.run(connection, async () => {
+    const profile = poolKey ? String(connection.profile || 'default') : primaryProfileKey()
+    let scope = poolKey || sshScopeKey(profile)
+    let state = sshConnections.get(scope)
+
+    if ((!state || state.kind !== 'ssh-attach') && connection.connectionId) {
+      const match = [...sshConnections.entries()].find(
+        ([, candidate]) => candidate.kind === 'ssh-attach' && candidate.registryConnectionId === connection.connectionId
+      )
+
+      if (match) {
+        [scope, state] = match
+      }
+    }
+
+    if (!state && poolKey) {
+      scope = sshScopeKey(primaryProfileKey())
+      state = sshConnections.get(scope)
+    }
+
+    if (!state?.ssh || state.kind !== 'ssh-attach') {
+      throw new Error('SSH attach-only connection state is unavailable.')
+    }
+
+    const registryConnectionId = typeof connection.connectionId === 'string' ? connection.connectionId : ''
+    const registryEntry = registryConnectionId
+      ? readDesktopConnectionsRegistry().connections.find(entry => entry.id === registryConnectionId)
+      : null
+    const source = registryEntry ? `registry:${registryEntry.id}` : connection.source
+    const oldForward = { localPort: state.localPort, remotePort: state.remotePort }
+
+    const result = await sshAttach.reattach(state.ssh, oldForward, {
+      pickLocalPort,
+      waitForHermes: (baseUrl, token) => waitForHermes(baseUrl, token, undefined, 'token')
+    })
+    const descriptor: any = await buildRemoteConnection(
+      result.baseUrl,
+      'token',
+      result.token,
+      source,
+      state.hostLabel,
+      'ssh',
+      connection.remoteIdentity,
+      connection.headers
+    )
+    descriptor.attachOnly = true
+    persistSshConnectionToken(profile, source, result.token, registryConnectionId)
+    sshConnections.set(scope, { ...state, localPort: result.localPort, remotePort: result.remotePort, pid: result.pid })
+
+    return { ...connection, ...descriptor, attachOnly: true }
   })
 }
 
@@ -15175,7 +15253,8 @@ function revalidateSuspectPoolAfterResume() {
         await sshBootstrapCoordinator.cancelAndWait(poolKey)
         await teardownSshConnection(poolKey)
       },
-      tracker: remoteLiveness
+      tracker: remoteLiveness,
+      reattach: (poolKey, connection) => reattachAttachOnlyConnection(connection, poolKey)
     })
   )
 }
