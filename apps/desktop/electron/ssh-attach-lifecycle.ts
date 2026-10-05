@@ -210,6 +210,40 @@ export async function attach(ssh: AttachSshConnection, opts: AttachOptions = {})
   }
 }
 
+export interface AttachStateCandidate {
+  kind?: string
+  registryConnectionId?: string
+}
+
+/**
+ * Which ssh state a re-attach may use: the connection's own scope, else the
+ * ssh-attach state registered for the same registry connection id. Never
+ * another connection's state. Borrowing the primary's would read a different
+ * host's rendezvous files and hand this connection that host's base URL and
+ * token.
+ */
+export function resolveAttachState<T extends AttachStateCandidate>(
+  states: Map<string, T>,
+  scope: string,
+  connectionId?: null | string
+): [string, T] | null {
+  const own = states.get(scope)
+
+  if (own && own.kind === 'ssh-attach') {
+    return [scope, own]
+  }
+
+  if (connectionId) {
+    for (const [key, candidate] of states) {
+      if (candidate.kind === 'ssh-attach' && candidate.registryConnectionId === connectionId) {
+        return [key, candidate]
+      }
+    }
+  }
+
+  return null
+}
+
 export async function detach(
   ssh: Pick<AttachSshConnection, 'cancelForward'>,
   handle: { localPort: number; remotePort: number }

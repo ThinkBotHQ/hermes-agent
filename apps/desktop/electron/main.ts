@@ -15163,27 +15163,19 @@ async function reattachAttachOnlyConnection(connection, poolKey?: string) {
 
   return remoteRevalidation.run(connection, async () => {
     const profile = poolKey ? String(connection.profile || 'default') : primaryProfileKey()
-    let scope = poolKey || sshScopeKey(profile)
-    let state = sshConnections.get(scope)
+    // Only this connection's own ssh state (see resolveAttachState): a pooled connection must
+    // never re-attach through the primary's ssh connection, which may be another host.
+    const resolved = sshAttach.resolveAttachState<any>(
+      sshConnections,
+      poolKey || sshScopeKey(profile),
+      typeof connection.connectionId === 'string' ? connection.connectionId : null
+    )
 
-    if ((!state || state.kind !== 'ssh-attach') && connection.connectionId) {
-      const match = [...sshConnections.entries()].find(
-        ([, candidate]) => candidate.kind === 'ssh-attach' && candidate.registryConnectionId === connection.connectionId
-      )
-
-      if (match) {
-        [scope, state] = match
-      }
-    }
-
-    if (!state && poolKey) {
-      scope = sshScopeKey(primaryProfileKey())
-      state = sshConnections.get(scope)
-    }
-
-    if (!state?.ssh || state.kind !== 'ssh-attach') {
+    if (!resolved?.[1]?.ssh) {
       throw new Error('SSH attach-only connection state is unavailable.')
     }
+
+    const [scope, state] = resolved
 
     const registryConnectionId = typeof connection.connectionId === 'string' ? connection.connectionId : ''
     const registryEntry = registryConnectionId

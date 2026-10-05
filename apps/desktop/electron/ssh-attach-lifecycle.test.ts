@@ -9,6 +9,7 @@ import {
   AttachTokenMismatchError,
   detach,
   reattach,
+  resolveAttachState,
   tokenFingerprint
 } from './ssh-attach-lifecycle'
 
@@ -262,4 +263,32 @@ describe('ssh-attach-lifecycle', () => {
     assert.match(ssh.calls[0], /cat "\$lockdir\/host-serve\.json"/)
     assert.doesNotMatch(ssh.calls[0], /\b(kill|pkill|spawn)\b/i)
   })
+})
+
+test('(g) a re-attach resolves only the connection\'s own ssh state, never another host\'s', () => {
+  const primary = { kind: 'ssh-attach', registryConnectionId: 'conn-a', host: 'host-a' }
+  const pooled = { kind: 'ssh-attach', registryConnectionId: 'conn-b', host: 'host-b' }
+  const managed = { kind: 'ssh', registryConnectionId: 'conn-c', host: 'host-c' }
+
+  const states = new Map<string, typeof primary>([
+    ['ssh::default', primary],
+    ['conn:b::default', pooled],
+    ['conn:c::default', managed]
+  ])
+
+  // its own scope
+  assert.deepEqual(resolveAttachState(states, 'conn:b::default', 'conn-b'), ['conn:b::default', pooled])
+  // scope missing, same registry connection id registered under another key
+  assert.deepEqual(resolveAttachState(states, 'conn:b::work', 'conn-b'), ['conn:b::default', pooled])
+
+  // The pooled connection's state is gone (torn down) and nothing carries its id: it must NOT
+  // fall back to the primary's state, which belongs to host A.
+  states.delete('conn:b::default')
+  assert.equal(resolveAttachState(states, 'conn:b::default', 'conn-b'), null)
+  assert.equal(resolveAttachState(states, 'conn:b::default', null), null)
+
+  // a managed (non-attach) ssh state is never used for a re-attach
+  assert.equal(resolveAttachState(states, 'conn:c::default', 'conn-c'), null)
+  // the primary still resolves to itself
+  assert.deepEqual(resolveAttachState(states, 'ssh::default', 'conn-a'), ['ssh::default', primary])
 })
