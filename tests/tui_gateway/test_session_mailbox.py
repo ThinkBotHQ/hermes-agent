@@ -919,3 +919,21 @@ def test_queued_rows_older_than_the_ttl_expire_on_the_startup_scan(gw):
     assert gw.mb.drain_pending() == 0
     assert gw.resumes == [], "an expired row never wakes its target"
     assert gw.db.peer_mailbox_get(old["message_id"])["last_error"] == "expired"
+
+
+def test_target_that_lives_only_in_another_backend_fails_visibly_and_queues_nothing(gw, tmp_path):
+    """HX-1: a backend resolves session_send targets in its OWN state.db. A session that exists
+    only in another backend's database (a Mac-local session while the sender runs on the host
+    backend, or the reverse) is unknown here: the send fails at once and nothing is queued on
+    either side, so a message is never silently parked for a session this backend cannot wake."""
+    other_backend = SessionDB(tmp_path / "other-backend" / "state.db")
+    other_backend.create_session("mac-local", "desktop")
+    try:
+        result = _send(gw, target="mac-local")
+
+        assert result["status"] == "failed"
+        assert gw.db.peer_mailbox_pending() == []
+        assert other_backend.peer_mailbox_pending() == []
+        assert gw.submits == [] and gw.resumes == []
+    finally:
+        other_backend.close()
