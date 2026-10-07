@@ -237,6 +237,7 @@ export function ConnectionsRegistrySection() {
   const [searchQuery, setSearchQuery] = useState('')
   const searchInputRef = useRef<HTMLInputElement>(null)
   const pendingSearchTopRef = useRef<null | number>(null)
+  const flyHostPrefilledRef = useRef(false)
   // Inline duplicate rejection from the save path (dedupe is also enforced in
   // the main process, so a crafted payload can't slip past the UI check).
   const [dupeError, setDupeError] = useState<null | string>(null)
@@ -279,6 +280,7 @@ export function ConnectionsRegistrySection() {
   }, [load])
 
   const openEditor = (next: EditorState | null, saved?: DesktopRegistryConnection): void => {
+    flyHostPrefilledRef.current = false
     setDupeError(null)
     remote.reset({
       url: saved?.url || '',
@@ -827,6 +829,7 @@ export function ConnectionsRegistrySection() {
                 action={
                   <Input
                     onChange={e => {
+                      flyHostPrefilledRef.current = true
                       setDupeError(null)
                       setEditor({ ...editor, host: e.target.value })
                     }}
@@ -840,6 +843,12 @@ export function ConnectionsRegistrySection() {
                 <ListRow
                   action={
                     <Input
+                      onBlur={() => {
+                        if (!flyHostPrefilledRef.current && !editor.host.trim() && editor.flyApp.trim()) {
+                          flyHostPrefilledRef.current = true
+                          setEditor({ ...editor, host: `hermes@${editor.flyApp.trim()}:2222` })
+                        }
+                      }}
                       onChange={e => setEditor({ ...editor, flyApp: e.target.value })}
                       placeholder={t.settings.gateway.sshFlyAppPlaceholder}
                       value={editor.flyApp}

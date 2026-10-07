@@ -322,6 +322,11 @@ export async function startFlyProxy(
   opts: StartFlyProxyOptions = {}
 ): Promise<FlyProxyHandle> {
   const validApp = validateFlyApp(app)
+
+  if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) {
+    throw new Error(`Invalid remote port: ${remotePort}`)
+  }
+
   const flyBinary = opts.flyBinary || resolveFlyBinary(opts.binaryDeps)
   const spawnFn = opts.spawn || spawn
 
@@ -479,7 +484,7 @@ export async function startFlyProxy(
     entry.proxyPid = proxyPid
 
     child.stderr?.on('data', chunk => {
-      stderr += chunk.toString()
+      stderr = (stderr + chunk.toString()).slice(0, 4096)
     })
 
     child.on('exit', (code, sig) => {
@@ -555,7 +560,7 @@ export async function startFlyProxy(
     })
 
     child.stderr?.on('data', chunk => {
-      stderr += chunk.toString()
+      stderr = (stderr + chunk.toString()).slice(0, 4096)
     })
 
     child.on('exit', (code, sig) => {

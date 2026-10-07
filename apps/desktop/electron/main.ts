@@ -54,6 +54,7 @@ import { stageAppInstallerFile } from './app-installer-file'
 import { appVersionInfo, type AppVersionInfo, assertSourceUpdateChannel, packagedReleaseChannel } from './app-version'
 import { runAppInstallerChecker } from './appinstaller-checker'
 import { installApplicationMenuAfterFirstWindow } from './application-menu-startup'
+import { hasKnownHost, hostKeyFingerprint, resolveAttachTransport } from './attach-transport'
 import { stopBackendChild as stopBackendChildImpl, waitForBackendExit } from './backend-child'
 import {
   type BackendOutputTail,
@@ -186,6 +187,7 @@ import {
   type SharedRegistryProfileScope,
   shouldDeferLocalEnumeration,
   shouldRetrySshInventory,
+  sshAttachDialIdentity,
   updateEligibility,
   upsertConnection
 } from './connection-registry'
@@ -244,6 +246,7 @@ import {
   stopFind
 } from './find-in-page'
 import { createFirstRunSetupGate } from './first-run-setup-gate'
+import { killAllFlyProxiesSync, stopAllFlyProxies } from './fly-proxy-lifecycle'
 import { createFrameNavigationGuard } from './frame-navigation'
 import { registerFsIpc } from './fs-ipc'
 import type {
@@ -9009,6 +9012,18 @@ async function saveRegistryConnection(input: any = {}) {
   // their secondaries for this connection id.
   if (existing && connectionDialFieldsChanged(existing, entry)) {
     await stopRegistryConnectionBackends(entry.id)
+
+    if (registry.primary === entry.id && existing.kind === 'ssh-attach') {
+      await sshBootstrapCoordinator.cancelAndWait(sshScopeKey(primaryProfileKey()))
+    }
+
+    for (const [scope, state] of sshConnections) {
+      if (state.primaryRegistryScope && state.registryConnectionId === entry.id && state.kind === 'ssh-attach') {
+        await sshBootstrapCoordinator.cancelAndWait(scope)
+        await teardownSshConnection(scope)
+      }
+    }
+
     // The id now names a different machine: its cached roster/identity describe the old one,
     // and a cached ssh inventory is never retried (`shouldRetrySshInventory`).
     evictConnectionCaches(entry.id)
@@ -9696,29 +9711,33 @@ async function teardownSshConnection(profile) {
   // alone leaves the backend at pid 1 holding state.db (#91668).
   // Windows remotes use a different lifecycle (connectWindowsRemote) and
   // are left to a follow-up; POSIX is the leak that OOM'd gateways.
-  await sshTeardowns.track(state.ssh, (): Promise<void> =>
-    teardownSshState(
-      {
-        ...state,
-        ownershipId: state.ownershipId || sshOwnershipKey(profile)
-      },
-      {
-        cleanupRemote:
-          state.kind === 'ssh-attach'
-            ? async (ssh: any) => {
-                await sshAttach.detach(ssh, state)
-              }
-            : state.remotePlatform === 'Windows'
-              ? async () => {
-                  // connectWindowsRemote does not share POSIX lock/kill. Stay
-                  // silent on the kill path, but leave a log so quit is not a
-                  // mysterious no-op on Windows remotes.
-                  sshRememberLog('[ssh] skip remote serve teardown on Windows remotes; POSIX disconnect does not apply')
+  try {
+    await sshTeardowns.track(state.ssh, (): Promise<void> =>
+      teardownSshState(
+        {
+          ...state,
+          ownershipId: state.ownershipId || sshOwnershipKey(profile)
+        },
+        {
+          cleanupRemote:
+            state.kind === 'ssh-attach'
+              ? async (ssh: any) => {
+                  await sshAttach.detach(ssh, state)
                 }
-              : remoteLifecycle.disconnect
-      }
+              : state.remotePlatform === 'Windows'
+                ? async () => {
+                    // connectWindowsRemote does not share POSIX lock/kill. Stay
+                    // silent on the kill path, but leave a log so quit is not a
+                    // mysterious no-op on Windows remotes.
+                    sshRememberLog('[ssh] skip remote serve teardown on Windows remotes; POSIX disconnect does not apply')
+                  }
+                : remoteLifecycle.disconnect
+        }
+      )
     )
-  )
+  } finally {
+    await state.flyProxy?.stop()
+  }
 }
 
 // CRITICAL: this must mirror resolveRemoteBackend's precedence, not just return
@@ -9913,7 +9932,7 @@ async function bootstrapSshConnection(
 // fence: exact-terminate the serve this bootstrap owns (never a foreign one),
 // drop its forward and transport, and surface a fence error so the managed
 // updater refuses to mutate a remote install with an unfenced serve.
-async function rollbackSshBootstrapResult(ssh, result, profile, sshConfig, boundaryError) {
+async function rollbackSshBootstrapResult(ssh, result, profile, sshConfig, boundaryError, flyProxy?) {
   const cleanupErrors: string[] = []
   const scope = sshScopeKey(profile)
 
@@ -9961,8 +9980,11 @@ async function rollbackSshBootstrapResult(ssh, result, profile, sshConfig, bound
 
   if (sshConnections.get(scope)?.ssh === ssh) {
     sshIsolatedKeepalives.stop(scope)
+    flyProxy = sshConnections.get(scope)?.flyProxy || flyProxy
     sshConnections.delete(scope)
   }
+
+  await flyProxy?.stop()
 
   if (cleanupErrors.length > 0) {
     const unsafe: any = new Error(
@@ -9981,7 +10003,21 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
   const hostLabel = sshConfig.user ? `${sshConfig.user}@${sshConfig.host}` : sshConfig.host
   const existing = sshConnections.get(scope)
 
-  if (existing && existing.fingerprint !== fingerprint) {
+  const registryEntry = metadata.registryConnectionId
+    ? readDesktopConnectionsRegistry().connections.find(entry => entry.id === metadata.registryConnectionId)
+    : null
+
+  const isAttach =
+    metadata?.connectionKind === 'ssh-attach' ||
+    sshConfig?.mode === 'ssh-attach' ||
+    registryEntry?.kind === 'ssh-attach'
+
+  const dialIdentity = isAttach && registryEntry ? sshAttachDialIdentity(registryEntry) : undefined
+
+  if (existing && (existing.fingerprint !== fingerprint ||
+      (dialIdentity && existing.dialIdentity !== dialIdentity) ||
+      existing.flyProxyDead ||
+      (existing.flyProxy && !existing.flyProxy.alive()))) {
     await teardownSshConnection(profile)
   }
 
@@ -9996,42 +10032,67 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
 
     ssh = null
     sshIsolatedKeepalives.stop(scope)
+    await sshConnections.get(scope)?.flyProxy?.stop()
     sshConnections.delete(scope)
   }
 
   const created = !ssh
+  let flyProxy = sshConnections.get(scope)?.flyProxy
+  let route = sshConnections.get(scope)?.route || 'direct'
 
   let removeForceCleanup = () => {}
 
-  if (created) {
-    ssh = new SshConnection(
-      { host: sshConfig.host, user: sshConfig.user, port: sshConfig.port, keyPath: sshConfig.keyPath },
-      {
-        rememberLog: sshRememberLog,
-        ownershipId: sshOwnershipKey(profile),
-        scope,
-        effectiveConfigFingerprint: sshConfig.effectiveConfigFingerprint
-      }
-    )
-    removeForceCleanup = lease.onForceCleanup(() => ssh.close())
-    await ssh.open({ signal: lease.signal })
-  }
-
   let result: any
-  let isAttach = false
 
   try {
+    if (created) {
+      const transport = isAttach && registryEntry?.flyApp
+        ? await resolveAttachTransport(
+            { host: sshConfig.host, port: sshConfig.port || 22, user: sshConfig.user, flyApp: registryEntry.flyApp },
+            {
+              signal: lease.signal,
+              onStatus: () => updateBootProgress({
+                phase: 'backend.remote', message: 'Starting host…', running: true, error: null
+              })
+            }
+          )
+        : { route: 'direct' as const, host: sshConfig.host, port: sshConfig.port, user: sshConfig.user }
+
+      route = transport.route
+      flyProxy = transport.route === 'fly-proxy' ? transport.proxy : undefined
+      const hostKeyAlias = transport.route === 'fly-proxy' ? transport.hostKeyAlias : undefined
+
+      const hostKeyName = hostKeyAlias || (transport.port && transport.port !== 22
+        ? `[${transport.host}]:${transport.port}` : transport.host)
+
+      const shouldLogHostKey = isAttach && (Boolean(hostKeyAlias) || !(await hasKnownHost(hostKeyName)))
+
+      ssh = new SshConnection(
+        { host: transport.host, user: transport.user, port: transport.port, keyPath: sshConfig.keyPath, hostKeyAlias },
+        {
+          rememberLog: sshRememberLog,
+          ownershipId: sshOwnershipKey(profile),
+          scope,
+          effectiveConfigFingerprint: sshConfig.effectiveConfigFingerprint
+        }
+      )
+      removeForceCleanup = lease.onForceCleanup(async () => {
+        await ssh.close()
+        await flyProxy?.stop()
+      })
+      await ssh.open({ signal: lease.signal })
+
+      if (isAttach && shouldLogHostKey) {
+        const fingerprint = await hostKeyFingerprint(hostKeyName)
+        sshRememberLog(fingerprint
+          ? `[ssh] host key for ${hostKeyName}: ${fingerprint}`
+          : '[ssh] host key fingerprint unavailable')
+      }
+    }
+
     if (metadata.registryConnectionId) {
       managedConnectionUpdateGate.assertCanDial(metadata.registryConnectionId, metadata.managedUpdateCorrelation || '')
     }
-
-    isAttach =
-      metadata?.connectionKind === 'ssh-attach' ||
-      sshConfig?.mode === 'ssh-attach' ||
-      (metadata?.registryConnectionId
-        ? readDesktopConnectionsRegistry().connections.find(c => c.id === metadata.registryConnectionId)?.kind ===
-          'ssh-attach'
-        : false)
 
     if (isAttach) {
       result = await sshAttach.attach(ssh, {
@@ -10063,10 +10124,12 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
   } catch (error: any) {
     if (created) {
       try {
-        await ssh.close()
+        await ssh?.close()
       } catch {
         void 0
       }
+
+      await flyProxy?.stop()
     } else {
       // The cached master was reused but the lifecycle probe against it
       // failed ("Could not verify the existing SSH backend"). Keeping the
@@ -10092,7 +10155,7 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
   try {
     lease.assertCurrent()
   } catch (error) {
-    await rollbackSshBootstrapResult(ssh, result, profile, sshConfig, error)
+    await rollbackSshBootstrapResult(ssh, result, profile, sshConfig, error, flyProxy)
     throw error
   }
 
@@ -10111,6 +10174,9 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
       sshConnections.set(scope, {
         ssh,
         fingerprint,
+        flyProxy,
+        route,
+        dialIdentity,
         kind: isAttach ? 'ssh-attach' : 'ssh',
         ownershipId: result.ownershipId || sshOwnershipKey(profile),
         localPort: result.localPort,
@@ -10137,11 +10203,22 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
         // site may label a registry-qualified SSH scope as the primary backend.
         primaryRegistryScope: metadata.primaryRegistryScope === true
       })
+
       if (!isAttach) {
         sshIsolatedKeepalives.start(scope, { baseUrl: result.baseUrl, token: result.token })
       }
+
+      if (flyProxy) {
+        flyProxy.onExit(() => {
+          const state = sshConnections.get(scope)
+
+          if (state?.ssh === ssh && state.flyProxy === flyProxy) {
+            state.flyProxyDead = true
+          }
+        })
+      }
     },
-    rollback: error => rollbackSshBootstrapResult(ssh, result, profile, sshConfig, error)
+    rollback: error => rollbackSshBootstrapResult(ssh, result, profile, sshConfig, error, flyProxy)
   })
 
   sshRememberLog(
@@ -11615,6 +11692,7 @@ async function drainManagedSshScope(scope) {
       if (state && sshConnections.get(scope.key) === state) {
         sshIsolatedKeepalives.stop(scope.key)
         sshConnections.delete(scope.key)
+        await state.flyProxy?.stop()
       }
     }
   }
@@ -12392,6 +12470,7 @@ async function teardownSshForQuit(): Promise<void> {
   await sshTeardowns.finish(sshBootstrapCoordinator.promises(), (): Promise<void> =>
     sshBootstrapCoordinator.forceCleanupAll()
   )
+  await stopAllFlyProxies()
 }
 
 async function exitAfterBackendShutdown(code) {
@@ -15163,31 +15242,43 @@ async function reattachAttachOnlyConnection(connection, poolKey?: string) {
 
   return remoteRevalidation.run(connection, async () => {
     const profile = poolKey ? String(connection.profile || 'default') : primaryProfileKey()
-    // Only this connection's own ssh state (see resolveAttachState): a pooled connection must
-    // never re-attach through the primary's ssh connection, which may be another host.
-    const resolved = sshAttach.resolveAttachState<any>(
-      sshConnections,
-      poolKey || sshScopeKey(profile),
-      typeof connection.connectionId === 'string' ? connection.connectionId : null
-    )
-
-    if (!resolved?.[1]?.ssh) {
-      throw new Error('SSH attach-only connection state is unavailable.')
-    }
-
-    const [scope, state] = resolved
-
     const registryConnectionId = typeof connection.connectionId === 'string' ? connection.connectionId : ''
+
     const registryEntry = registryConnectionId
       ? readDesktopConnectionsRegistry().connections.find(entry => entry.id === registryConnectionId)
       : null
+
+    const planned = sshAttach.planReattach({
+      states: sshConnections,
+      scope: poolKey || sshScopeKey(profile),
+      connectionId: registryConnectionId,
+      registryEntry
+    })
+
+    if (!planned.ok || !planned.state.ssh) {
+      throw new Error('SSH attach-only connection state is unavailable.')
+    }
+
+    const { scope, state } = planned
     const source = registryEntry ? `registry:${registryEntry.id}` : connection.source
+
+    if (state.flyProxyDead || (state.flyProxy && !state.flyProxy.alive()) || !(await state.ssh.isAlive())) {
+      await teardownSshConnection(scope)
+
+      return bootstrapSshConnection(scope, connection.ssh, '', source, undefined, {
+        connectionKind: 'ssh-attach',
+        registryConnectionId,
+        primaryRegistryScope: state.primaryRegistryScope
+      })
+    }
+
     const oldForward = { localPort: state.localPort, remotePort: state.remotePort }
 
     const result = await sshAttach.reattach(state.ssh, oldForward, {
       pickLocalPort,
       waitForHermes: (baseUrl, token) => waitForHermes(baseUrl, token, undefined, 'token')
     })
+
     const descriptor: any = await buildRemoteConnection(
       result.baseUrl,
       'token',
@@ -15198,6 +15289,7 @@ async function reattachAttachOnlyConnection(connection, poolKey?: string) {
       connection.remoteIdentity,
       connection.headers
     )
+
     descriptor.attachOnly = true
     persistSshConnectionToken(profile, source, result.token, registryConnectionId)
     sshConnections.set(scope, { ...state, localPort: result.localPort, remotePort: result.remotePort, pid: result.pid })
@@ -17697,6 +17789,7 @@ app.on('before-quit', () => {
 // Close the pooled keep-alive sockets on quit so lingering connections can't
 // hold the event loop open or leak FDs past app teardown.
 app.on('will-quit', () => {
+  killAllFlyProxiesSync()
   sessionTokenFiles.removeAll()
   sshIsolatedKeepalives.stopAll()
   destroyKeepaliveAgents()

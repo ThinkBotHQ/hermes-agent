@@ -556,4 +556,26 @@ describe('dedupe helpers', () => {
     fireEvent.click(screen.getByRole('button', { name: 'SSH (attach to host backend)' }))
     expect(screen.getByPlaceholderText('my-fly-app')).toBeTruthy()
   })
+
+  it('prefills an empty SSH host from Fly app once without replacing an edited host', async () => {
+    render(<ConnectionsRegistrySection />)
+    await waitFor(() => expect(screen.getByText('Homelab')).toBeTruthy())
+    fireEvent.click(screen.getByText('Add connection'))
+    fireEvent.click(screen.getByRole('button', { name: 'SSH (attach to host backend)' }))
+
+    const host = screen.getByPlaceholderText('user@host:22') as HTMLInputElement
+    const app = screen.getByPlaceholderText('my-fly-app')
+    fireEvent.change(app, { target: { value: 'first-app' } })
+    fireEvent.blur(app)
+    expect(host.value).toBe('hermes@first-app:2222')
+
+    fireEvent.change(host, { target: { value: 'alice@custom-host:2200' } })
+    fireEvent.change(app, { target: { value: 'second-app' } })
+    fireEvent.blur(app)
+    expect(host.value).toBe('alice@custom-host:2200')
+
+    fireEvent.change(host, { target: { value: '' } })
+    fireEvent.blur(app)
+    expect(host.value).toBe('')
+  })
 })

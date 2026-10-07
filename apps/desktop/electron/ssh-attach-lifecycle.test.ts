@@ -8,6 +8,7 @@ import {
   AttachNoBackendError,
   AttachTokenMismatchError,
   detach,
+  planReattach,
   reattach,
   resolveAttachState,
   tokenFingerprint
@@ -291,4 +292,23 @@ test('(g) a re-attach resolves only the connection\'s own ssh state, never anoth
   assert.equal(resolveAttachState(states, 'conn:c::default', 'conn-c'), null)
   // the primary still resolves to itself
   assert.deepEqual(resolveAttachState(states, 'ssh::default', 'conn-a'), ['ssh::default', primary])
+})
+
+test('same registry id with a different dial identity fails closed', () => {
+  const state = { kind: 'ssh-attach', registryConnectionId: 'lab', dialIdentity: 'hermes@host-a:2222|' }
+  const states = new Map([['primary', state]])
+
+  assert.equal(resolveAttachState(states, 'primary', 'lab', 'hermes@host-b:2222|'), null)
+  assert.equal(resolveAttachState(states, 'conn:lab::default', 'lab', 'hermes@host-b:2222|'), null)
+})
+
+test('reattach plan rejects old primary host after registry edit', () => {
+  const states = new Map([['primary', {
+    kind: 'ssh-attach', registryConnectionId: 'lab', dialIdentity: 'hermes@host-a:2222|'
+  }]])
+
+  assert.deepEqual(planReattach({
+    states, scope: 'conn:lab::default', connectionId: 'lab',
+    registryEntry: { id: 'lab', kind: 'ssh-attach', host: 'host-b', port: 2222, user: 'hermes' }
+  }), { ok: false, reason: 'state-unavailable' })
 })

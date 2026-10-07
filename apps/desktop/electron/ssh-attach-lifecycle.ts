@@ -24,6 +24,7 @@
 
 import crypto from 'node:crypto'
 
+import { sshAttachDialIdentity } from './connection-registry'
 import { pickLocalPort as defaultPickLocalPort } from './ssh-connection'
 
 export class AttachNoBackendError extends Error {
@@ -211,6 +212,7 @@ export async function attach(ssh: AttachSshConnection, opts: AttachOptions = {})
 }
 
 export interface AttachStateCandidate {
+  dialIdentity?: string
   kind?: string
   registryConnectionId?: string
 }
@@ -225,23 +227,46 @@ export interface AttachStateCandidate {
 export function resolveAttachState<T extends AttachStateCandidate>(
   states: Map<string, T>,
   scope: string,
-  connectionId?: null | string
+  connectionId?: null | string,
+  expectedDialIdentity?: string
 ): [string, T] | null {
   const own = states.get(scope)
 
-  if (own && own.kind === 'ssh-attach') {
+  if (own && own.kind === 'ssh-attach' &&
+      (expectedDialIdentity === undefined || own.dialIdentity === expectedDialIdentity)) {
     return [scope, own]
   }
 
   if (connectionId) {
     for (const [key, candidate] of states) {
-      if (candidate.kind === 'ssh-attach' && candidate.registryConnectionId === connectionId) {
+      if (candidate.kind === 'ssh-attach' && candidate.registryConnectionId === connectionId &&
+          (expectedDialIdentity === undefined || candidate.dialIdentity === expectedDialIdentity)) {
         return [key, candidate]
       }
     }
   }
 
   return null
+}
+
+export function planReattach<T extends AttachStateCandidate>(input: {
+  connectionId?: null | string
+  registryEntry?: null | { flyApp?: string; host: string; id?: string; kind?: string; port?: number; user?: string }
+  scope: string
+  states: Map<string, T>
+}): { ok: true; scope: string; state: T } | { ok: false; reason: 'state-unavailable' } {
+  if (input.connectionId && !input.registryEntry) {
+    return { ok: false, reason: 'state-unavailable' }
+  }
+
+  const identity = input.registryEntry ? sshAttachDialIdentity(input.registryEntry) : undefined
+  const resolved = resolveAttachState(input.states, input.scope, input.connectionId, identity)
+
+  if (!resolved) {
+    return { ok: false, reason: 'state-unavailable' }
+  }
+
+  return { ok: true, scope: resolved[0], state: resolved[1] }
 }
 
 export async function detach(

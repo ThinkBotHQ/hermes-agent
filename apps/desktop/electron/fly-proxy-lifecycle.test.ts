@@ -7,6 +7,7 @@ import path from 'node:path'
 
 import { afterEach, beforeEach, describe, test } from 'vitest'
 
+import { resolveAttachTransport } from './attach-transport'
 import {
   ensureFlyMachineStarted,
   FlyAuthError,
@@ -483,6 +484,56 @@ if (argv[0] === 'proxy') {
     for (const call of proxyCalls) {
       assert.throws(() => process.kill(call.pid, 0), /ESRCH/)
     }
+  })
+
+  test('rejects an invalid remote port before spawning', async () => {
+    for (const port of [0, 65536, 22.5, NaN]) {
+      await assert.rejects(() => startFlyProxy('tb-worker-host', port, { flyBinary: fakeFlyPath }), /remote port/i)
+    }
+
+    assert.deepEqual(readFakeFlyLogs(), [])
+  })
+
+  test('caps reported proxy stderr at 4 KB and keeps its head', async () => {
+    process.env.FAKE_FLY_PROXY_FAIL_STDERR = `HEAD-${'x'.repeat(8000)}-TAIL`
+
+    await assert.rejects(() => startFlyProxy('tb-worker-host', 22, {
+      flyBinary: fakeFlyPath,
+      readyTimeoutMs: 3000
+    }), (error: any) => {
+      assert.match(error.message, /HEAD-/)
+      assert.doesNotMatch(error.message, /-TAIL/)
+      assert.ok(error.message.length < 4500)
+
+      return true
+    })
+  })
+
+  test('two apps get isolated proxy ports and host key aliases', async () => {
+    const deps = {
+      directRetryMs: 0,
+      ensureFlyMachineStarted: async () => {},
+      probeTcp: async () => false,
+      startFlyProxy: (app: string, port: number) => startFlyProxy(app, port, { flyBinary: fakeFlyPath })
+    }
+
+    const [first, second] = await Promise.all([
+      resolveAttachTransport({ host: 'host-a', port: 2222, user: 'hermes', flyApp: 'app-a' }, deps),
+      resolveAttachTransport({ host: 'host-b', port: 2222, user: 'hermes', flyApp: 'app-b' }, deps)
+    ])
+
+    assert.equal(first.route, 'fly-proxy')
+    assert.equal(second.route, 'fly-proxy')
+
+    if (first.route !== 'fly-proxy' || second.route !== 'fly-proxy') {
+      throw new Error('Expected proxy routes')
+    }
+
+    assert.notEqual(first.port, second.port)
+    assert.notEqual(first.hostKeyAlias, second.hostKeyAlias)
+    await first.proxy.stop()
+    assert.equal(second.proxy.alive(), true)
+    assert.equal(await checkPortListening(second.port), true)
   })
 
   test('(h) proxy that never listens throws FlyProxyError after readyTimeoutMs and leaves no child', async () => {

@@ -1615,7 +1615,7 @@ export const en: Translations = {
       sshHermesPathPlaceholder: 'auto-detect',
       sshFlyAppTitle: 'Fly app (optional)',
       sshFlyAppDesc:
-        'Fly.io app name. When set, Hermes starts the machine and opens its own private tunnel with the Fly CLI; no VPN or terminal needed.',
+        'Fly.io app name. Hermes wakes the machine and, when the host is not directly reachable, opens its own tunnel with the Fly CLI.',
       sshFlyAppPlaceholder: 'my-fly-app',
       sshTestConnection: 'Test SSH',
       sshConnect: 'Connect',

@@ -1360,6 +1360,7 @@ export interface Translations {
       sshHermesPathDesc: string
       sshHermesPathPlaceholder: string
       sshFlyAppTitle: string
+      /** Explains direct-first SSH routing and the Fly CLI fallback. */
       sshFlyAppDesc: string
       sshFlyAppPlaceholder: string
       sshTestConnection: string
