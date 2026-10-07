@@ -2038,6 +2038,7 @@ export const zh = defineLocale({
       }
     },
     providers: {
+      accountsOnHost: host => `${host} 上的账号`,
       connectAccount: '连接账号',
       haveApiKey: '改用 API 密钥？',
       intro: '使用订阅登录，无需复制 API 密钥。Hermes 会在应用中为你完成浏览器登录。',

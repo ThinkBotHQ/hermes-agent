@@ -3,6 +3,7 @@ import { MemoryRouter } from 'react-router'
 import { afterEach, expect, it } from 'vitest'
 
 import { $backgroundStatusBySession } from '@/store/composer-status'
+import { $todoSectionCollapsed } from '@/store/composer-status-drawer'
 import { $goalsBySession } from '@/store/goals'
 import { $sessionControlBySession } from '@/store/session-control'
 import { $subagentsBySession, upsertSubagent } from '@/store/subagents'
@@ -40,6 +41,7 @@ afterEach(() => {
   $sessionControlBySession.set({})
   $subagentsBySession.set({})
   $todosBySession.set({})
+  $todoSectionCollapsed.set(false)
 })
 
 it('auto-expands only todos and keeps other groups closed as activity arrives', () => {
@@ -107,3 +109,42 @@ it('starts structured goals collapsed and preserves manual queue expansion when 
   view.rerender(stack(true))
   expect(screen.getByText('Queued request')).toBeTruthy()
 })
+
+it('persists todo section collapse across remount while leaving other groups unaffected', () => {
+  $todosBySession.set({
+    sessionA: [{ id: 'todo-1', content: 'Todo in session A', status: 'in_progress' }],
+    sessionB: [{ id: 'todo-2', content: 'Todo in session B', status: 'in_progress' }]
+  })
+  $goalsBySession.set({
+    sessionA: { status: 'active', title: 'Goal in session A', updatedAt: 1 },
+    sessionB: { status: 'active', title: 'Goal in session B', updatedAt: 1 }
+  })
+
+  // Mount session A: todo is auto-expanded by default, goal is collapsed
+  const first = render(
+    <MemoryRouter>
+      <ComposerStatusStack queue={queue(false)} sessionId="sessionA" />
+    </MemoryRouter>
+  )
+
+  expect(screen.getByText('Todo in session A')).toBeTruthy()
+  expect(screen.queryByText('Goal in session A')).toBeNull()
+
+  // Collapse the todo section
+  const todoTrigger = screen.getByRole('button', { name: /Tasks/ })
+  fireEvent.click(todoTrigger)
+  expect(screen.queryByText('Todo in session A')).toBeNull()
+
+  first.unmount()
+
+  // Remount with session B: todo should STILL be collapsed, other groups unaffected
+  render(
+    <MemoryRouter>
+      <ComposerStatusStack queue={queue(false)} sessionId="sessionB" />
+    </MemoryRouter>
+  )
+
+  expect(screen.queryByText('Todo in session B')).toBeNull()
+  expect(screen.queryByText('Goal in session B')).toBeNull()
+})
+

@@ -33,7 +33,7 @@ export function registrySshScopeForWindowRoute(
 
   const source = registry.connections.find(connection => connection.id === route.connectionId)
 
-  if (!source || source.kind !== 'ssh') {
+  if (!source || (source.kind !== 'ssh' && source.kind !== 'ssh-attach')) {
     return null
   }
 

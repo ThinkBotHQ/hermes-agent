@@ -36,6 +36,7 @@ import { providerGroup, providerMeta, providerPriority } from './helpers'
 import { LocalModelsSettings } from './local-models-settings'
 import { SettingsContent, SettingsSkeleton } from './primitives'
 import { SettingsProfileScope } from './profile-scope'
+import { useActiveRemoteConnectionLabel } from './subpage-navigation'
 
 // The embedded terminal (and thus the "run disconnect command" path) only
 // exists in the Electron desktop shell, not the web dashboard.
@@ -149,6 +150,7 @@ function OAuthPicker({
 }) {
   const { t } = useI18n()
   const p = t.settings.providers
+  const remoteConnectionLabel = useActiveRemoteConnectionLabel()
   const [showAll, setShowAll] = useState(false)
   const ordered = useMemo(() => sortProviders(providers), [providers])
 
@@ -156,6 +158,7 @@ function OAuthPicker({
     return null
   }
 
+  const headingTitle = remoteConnectionLabel ? p.accountsOnHost(remoteConnectionLabel) : p.connectAccount
   const select = (p: OAuthProvider) => startManualProviderOAuth(p.id, profile)
 
   // The free tier holds a token but no account: it is never "connected"; the featured Nous row
@@ -174,7 +177,7 @@ function OAuthPicker({
   return (
     <section className="mb-5 grid gap-2">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-        <SettingsCategoryHeading icon={KeyRound} title={p.connectAccount} />
+        <SettingsCategoryHeading icon={KeyRound} title={headingTitle} />
         <Button
           className="text-[length:var(--conversation-caption-font-size)]"
           onClick={onWantApiKey}

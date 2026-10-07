@@ -2513,6 +2513,7 @@ export const esOverrides = {
       }
     },
     providers: {
+      accountsOnHost: host => `Cuentas en ${host}`,
       connectAccount: 'Conectar una cuenta',
       haveApiKey: '¿Tienes una clave API?',
       intro:

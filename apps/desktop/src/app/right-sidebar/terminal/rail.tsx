@@ -24,6 +24,7 @@ import {
   closeOtherTerminals,
   closeTerminal,
   createTerminal,
+  formatTerminalTitle,
   selectTerminal,
   type TerminalEntry
 } from './terminals'
@@ -109,7 +110,7 @@ interface TerminalRailItemProps {
 
 function TerminalRailItem({ active, canCloseOthers, index, term, toggleHint }: TerminalRailItemProps) {
   const { t } = useI18n()
-  const label = `${index + 1}. ${term.title}`
+  const label = `${index + 1}. ${formatTerminalTitle(term.title, term.remoteLabel)}`
 
   return (
     <ContextMenu>

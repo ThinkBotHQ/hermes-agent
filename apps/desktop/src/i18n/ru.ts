@@ -1467,6 +1467,7 @@ export const ru = defineLocale({
       }
     },
     providers: {
+      accountsOnHost: host => `Аккаунты на ${host}`,
       connectAccount: 'Подключить аккаунт',
       haveApiKey: 'Ввести API-ключ вместо этого?',
       intro:

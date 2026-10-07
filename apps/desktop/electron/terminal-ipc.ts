@@ -22,7 +22,7 @@ export interface TerminalIpcDeps {
   rememberLog: (line: string) => void
   activeSshTerminalTarget: (webContentsId: number) => unknown
   ensureBackend: (webContentsId: number) => Promise<unknown>
-  getSshConnectionState: (scope: string) => undefined | { remotePlatform?: string }
+  getSshConnectionState: (scope: string) => undefined | { hostLabel?: string; remotePlatform?: string }
 }
 
 export interface TerminalIpcApi {
@@ -355,7 +355,12 @@ export function registerTerminalIpc({
     })
     event.sender.once('destroyed', () => disposeTerminalSession(id))
 
-    return { cwd: remote ? null : cwd, id, shell: remote ? 'ssh' : name }
+    return {
+      cwd: remote ? null : cwd,
+      id,
+      ...(remote && remoteState?.hostLabel ? { remoteLabel: remoteState.hostLabel } : {}),
+      shell: remote ? 'ssh' : name
+    }
   })
 
   ipcMain.handle('hermes:terminal:attach', (event, id) => {

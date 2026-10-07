@@ -1811,6 +1811,7 @@ export interface Translations {
       }
     }
     providers: {
+      accountsOnHost: (host: string) => string
       connectAccount: string
       haveApiKey: string
       intro: string

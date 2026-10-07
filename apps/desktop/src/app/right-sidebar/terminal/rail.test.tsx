@@ -31,4 +31,16 @@ describe('TerminalRail', () => {
     expect($activeTerminalId.get()).toBe('term-1')
     expect($terminals.get()).toHaveLength(1)
   })
+
+  it('renders remote host in tab label for remote terminals while local terminals stay plain', () => {
+    $terminals.set([
+      { auto: true, cwd: '/remote', id: 'term-remote', kind: 'user', remoteLabel: 'hermes@tb-worker-host', title: 'Terminal' },
+      { auto: true, cwd: '/local', id: 'term-local', kind: 'user', title: 'Terminal' }
+    ])
+
+    render(<TerminalRail />)
+
+    expect(screen.getByRole('tab', { name: '1. Terminal · hermes@tb-worker-host' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: '2. Terminal' })).toBeTruthy()
+  })
 })

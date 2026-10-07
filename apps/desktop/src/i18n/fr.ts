@@ -2531,6 +2531,7 @@ export const frOverrides = {
       }
     },
     providers: {
+      accountsOnHost: host => `Comptes sur ${host}`,
       connectAccount: 'Connecter un compte',
       haveApiKey: 'Vous avez une clé API ?',
       intro:

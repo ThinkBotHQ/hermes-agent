@@ -809,6 +809,7 @@ export interface DesktopMarketplaceThemeResult {
 export interface HermesTerminalSession {
   cwd: string
   id: string
+  remoteLabel?: string
   shell: string
 }
 

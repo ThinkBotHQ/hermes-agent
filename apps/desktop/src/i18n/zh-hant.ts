@@ -1674,6 +1674,7 @@ export const zhHant = defineLocale({
       }
     },
     providers: {
+      accountsOnHost: host => `${host} 上的帳號`,
       connectAccount: '連結帳號',
       haveApiKey: '改用 API 金鑰？',
       intro: '使用訂閱登入，無需複製 API 金鑰。Hermes 會在應用程式中為您完成瀏覽器登入。',

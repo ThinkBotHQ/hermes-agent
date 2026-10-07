@@ -1,8 +1,9 @@
 import type { ModelOptionProvider } from '@hermes/shared'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   $seenModels,
+  $visibleModels,
   clearSeenModels,
   collapseModelFamilies,
   defaultVisibleKeys,
@@ -13,11 +14,13 @@ import {
   markProvidersSeen,
   modelVisibilityKey,
   resolveVisibleKeys,
+  seedSeenModels,
   setProviderVisibility,
   setSeenModels,
-  seedSeenModels,
+  setVisibleModels,
   toggleModelVisibility
 } from './model-visibility'
+import { $connection } from './session'
 
 const provider = (slug: string, models: string[]): ModelOptionProvider => ({
   models,
@@ -338,6 +341,68 @@ describe('setProviderVisibility', () => {
     expect(next.has(modelVisibilityKey('nous', 'model'))).toBe(true)
     // The -fast sibling is represented by its base family, not its own key.
     expect(next.has(modelVisibilityKey('nous', 'model-fast'))).toBe(false)
+  })
+
+  afterEach(() => {
+    $connection.set(null)
+  })
+
+  it('namespaces model choices by connection without affecting local or sibling connections', () => {
+    // Seed pre-existing unsuffixed local key in localStorage
+    const localKey = modelVisibilityKey('openai', 'gpt-4o')
+    window.localStorage.setItem('hermes.desktop.visible-models', JSON.stringify([localKey]))
+    $connection.set({ connectionId: 'local', mode: 'local' } as never)
+
+    // Switch to connection A
+    $connection.set({ connectionId: 'conn-a', mode: 'remote' } as never)
+    const connAKey = modelVisibilityKey('anthropic', 'claude-3-5-sonnet')
+
+    const nextA = toggleModelVisibility(
+      new Set(),
+      [provider('anthropic', ['claude-3-5-sonnet'])],
+      'anthropic',
+      'claude-3-5-sonnet'
+    )
+
+    setVisibleModels(nextA)
+
+    // Verify conn-a persisted under namespaced key
+    expect(window.localStorage.getItem('hermes.desktop.visible-models::conn-a')).toContain(connAKey)
+    // Verify local unsuffixed key was NOT modified
+    expect(window.localStorage.getItem('hermes.desktop.visible-models')).toEqual(JSON.stringify([localKey]))
+
+    // Switch to connection B
+    $connection.set({ connectionId: 'conn-b', mode: 'remote' } as never)
+    expect($visibleModels.get()).toBeNull()
+
+    const connBKey = modelVisibilityKey('google', 'gemini-1.5-pro')
+
+    const nextB = toggleModelVisibility(
+      new Set(),
+      [provider('google', ['gemini-1.5-pro'])],
+      'google',
+      'gemini-1.5-pro'
+    )
+
+    setVisibleModels(nextB)
+
+    // Verify conn-b persisted under namespaced key
+    expect(window.localStorage.getItem('hermes.desktop.visible-models::conn-b')).toContain(connBKey)
+    // Conn A's key still unchanged
+    expect(window.localStorage.getItem('hermes.desktop.visible-models::conn-a')).toContain(connAKey)
+    expect(window.localStorage.getItem('hermes.desktop.visible-models::conn-a')).not.toContain(connBKey)
+
+    // Switching back to connection A restores A's set
+    $connection.set({ connectionId: 'conn-a', mode: 'remote' } as never)
+    expect($visibleModels.get()?.has(connAKey)).toBe(true)
+    expect($visibleModels.get()?.has(connBKey)).toBe(false)
+
+    // Switching back to local connection restores local set and reads unsuffixed key
+    $connection.set({ connectionId: 'local', mode: 'local' } as never)
+    expect($visibleModels.get()?.has(localKey)).toBe(true)
+    expect($visibleModels.get()?.has(connAKey)).toBe(false)
+    expect($visibleModels.get()?.has(connBKey)).toBe(false)
+    expect(window.localStorage.getItem('hermes.desktop.visible-models')).toEqual(JSON.stringify([localKey]))
   })
 })
 

@@ -2,6 +2,7 @@ import type { ModelOptionProvider } from '@hermes/shared'
 import { atom } from 'nanostores'
 
 import { persistString, storedString } from '@/lib/storage'
+import { $connection } from '@/store/session'
 
 const STORAGE_KEY = 'hermes.desktop.visible-models'
 
@@ -11,6 +12,15 @@ const STORAGE_KEY = 'hermes.desktop.visible-models'
  *  it falls through to the curated default rule instead of defaulting to hidden. */
 const KNOWN_STORAGE_KEY = 'hermes.desktop.known-models'
 const SEEN_STORAGE_KEY = 'hermes.desktop.seen-models'
+
+/** Storage key namespaced by connection. Local and default connections use the bare key. */
+export function modelVisibilityStorageKey(baseKey: string, connectionId?: null | string): string {
+  if (!connectionId || connectionId === 'local') {
+    return baseKey
+  }
+
+  return `${baseKey}::${connectionId}`
+}
 
 /** Models shown per provider in the status-bar dropdown before the user has
  *  customized the list. Backend `models` are already relevance-ordered. */
@@ -174,20 +184,49 @@ function loadKeySet(storageKey: string): Set<string> | null {
   }
 }
 
+let currentConnectionId: null | string = $connection.get()?.connectionId ?? null
+
+if (currentConnectionId === 'local') {
+  currentConnectionId = null
+}
+
 /** Explicit set of visible `provider::model` keys, or null when the user
  *  hasn't customized — in which case the curated default applies. */
-export const $visibleModels = atom<Set<string> | null>(loadKeySet(STORAGE_KEY))
+export const $visibleModels = atom<Set<string> | null>(
+  loadKeySet(modelVisibilityStorageKey(STORAGE_KEY, currentConnectionId))
+)
 
 /** Keys the user has seen, or null when nothing has been recorded yet (a fresh
  *  install, or a store written before the snapshot existed). */
-export const $knownModels = atom<Set<string> | null>(loadKeySet(KNOWN_STORAGE_KEY))
+export const $knownModels = atom<Set<string> | null>(
+  loadKeySet(modelVisibilityStorageKey(KNOWN_STORAGE_KEY, currentConnectionId))
+)
 
 /** Models the user has seen, persisted across reload so newly released models surface first. */
-export const $seenModels = atom<Set<string> | null>(loadKeySet(SEEN_STORAGE_KEY))
+export const $seenModels = atom<Set<string> | null>(
+  loadKeySet(modelVisibilityStorageKey(SEEN_STORAGE_KEY, currentConnectionId))
+)
+
+export function rescopeModelVisibility(connectionId?: null | string): void {
+  const normalizedId = connectionId && connectionId !== 'local' ? connectionId : null
+
+  if (normalizedId === currentConnectionId) {
+    return
+  }
+
+  currentConnectionId = normalizedId
+  $visibleModels.set(loadKeySet(modelVisibilityStorageKey(STORAGE_KEY, currentConnectionId)))
+  $knownModels.set(loadKeySet(modelVisibilityStorageKey(KNOWN_STORAGE_KEY, currentConnectionId)))
+  $seenModels.set(loadKeySet(modelVisibilityStorageKey(SEEN_STORAGE_KEY, currentConnectionId)))
+}
+
+$connection.subscribe(connection => {
+  rescopeModelVisibility(connection?.connectionId ?? null)
+})
 
 function persistSeenModels(seen: Set<string>): void {
   $seenModels.set(new Set(seen))
-  persistString(SEEN_STORAGE_KEY, JSON.stringify([...seen]))
+  persistString(modelVisibilityStorageKey(SEEN_STORAGE_KEY, currentConnectionId), JSON.stringify([...seen]))
 }
 
 export function setSeenModels(keys: Set<string>): void {
@@ -271,7 +310,7 @@ export function markProvidersSeen(providers: readonly ModelOptionProvider[]): vo
 
 export function clearSeenModels(): void {
   $seenModels.set(new Set())
-  persistString(SEEN_STORAGE_KEY, null)
+  persistString(modelVisibilityStorageKey(SEEN_STORAGE_KEY, currentConnectionId), null)
 }
 
 export const $modelVisibilityOpen = atom(false)
@@ -293,7 +332,7 @@ function allFamilyKeys(providers: readonly ModelOptionProvider[]): Set<string> {
  *  model in it as judged so only models that appear later count as new. */
 export function setVisibleModels(keys: Set<string>, providers: readonly ModelOptionProvider[] = []): void {
   $visibleModels.set(new Set(keys))
-  persistString(STORAGE_KEY, JSON.stringify([...keys]))
+  persistString(modelVisibilityStorageKey(STORAGE_KEY, currentConnectionId), JSON.stringify([...keys]))
 
   if (providers.length === 0) {
     return
@@ -304,7 +343,7 @@ export function setVisibleModels(keys: Set<string>, providers: readonly ModelOpt
 
 function persistKnownModels(known: Set<string>): void {
   $knownModels.set(known)
-  persistString(KNOWN_STORAGE_KEY, JSON.stringify([...known]))
+  persistString(modelVisibilityStorageKey(KNOWN_STORAGE_KEY, currentConnectionId), JSON.stringify([...known]))
 }
 
 /** One-time adoption for a visible set persisted before the known snapshot

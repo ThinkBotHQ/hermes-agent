@@ -188,4 +188,18 @@ describe('session cwd → terminal tab linking', () => {
     $currentCwd.set('/repo')
     expect($activeTerminalId.get()).toBe(first)
   })
+
+  it('formats terminal title with remote host when remote, staying plain for local', async () => {
+    const { $terminals, createTerminal, formatTerminalTitle, reportTerminalShell } = await loadTerminalStore()
+
+    expect(formatTerminalTitle('Terminal')).toBe('Terminal')
+    expect(formatTerminalTitle('Terminal', undefined)).toBe('Terminal')
+    expect(formatTerminalTitle('Terminal', '')).toBe('Terminal')
+    expect(formatTerminalTitle('Terminal', 'hermes@tb-worker-host')).toBe('Terminal · hermes@tb-worker-host')
+    expect(formatTerminalTitle('Terminal · hermes@tb-worker-host', 'hermes@tb-worker-host')).toBe('Terminal · hermes@tb-worker-host')
+
+    const termId = createTerminal('/repo')
+    reportTerminalShell(termId, 'ssh', 'hermes@tb-worker-host')
+    expect($terminals.get().find(t => t.id === termId)?.remoteLabel).toBe('hermes@tb-worker-host')
+  })
 })

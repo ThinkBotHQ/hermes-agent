@@ -34,6 +34,13 @@ export function statusDrawerKey(scope: StatusDrawerScope): string {
   return JSON.stringify([scope.connectionId, scope.profile, scope.targetProfile, scope.sessionId])
 }
 
+/** Global preference for the Tasks (todo) section collapse state in composer status stack. */
+export const $todoSectionCollapsed = persistentAtom<boolean>(
+  'hermes.desktop.todoSectionCollapsed',
+  false,
+  Codecs.bool
+)
+
 /** Only hidden drawers need an entry; new conversations keep the existing open default. */
 export const $collapsedStatusDrawers = persistentAtom<string[]>(
   'hermes.desktop.collapsedStatusDrawers.v1',

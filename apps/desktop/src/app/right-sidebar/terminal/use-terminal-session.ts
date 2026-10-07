@@ -243,7 +243,7 @@ interface UseTerminalSessionOptions {
   /** Serialized scrollback from the previous session, replayed once on mount. */
   reviveBuffer?: string
   /** Reports the resolved shell name once the PTY is live (for the tab label). */
-  onShell?: (shell: string) => void
+  onShell?: (shell: string, remoteLabel?: string) => void
 }
 
 // Parse a working directory out of a cwd-reporting OSC payload. Covers OSC 7
@@ -865,7 +865,7 @@ export function useTerminalSession({
           lastSentSize = { cols: term.cols, rows: term.rows }
           shellNameRef.current = session.shell || 'shell'
           setShellName(session.shell || 'shell')
-          onShellRef.current?.(session.shell || 'shell')
+          onShellRef.current?.(session.shell || 'shell', session.remoteLabel)
 
           const initial = term.hasSelection() ? term.getSelection() : ''
           selectionRef.current = initial

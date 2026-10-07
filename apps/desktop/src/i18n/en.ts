@@ -2163,6 +2163,7 @@ export const en: Translations = {
       }
     },
     providers: {
+      accountsOnHost: host => `Accounts on ${host}`,
       connectAccount: 'Connect an account',
       haveApiKey: 'Have an API key instead?',
       intro:

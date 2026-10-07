@@ -1418,6 +1418,7 @@ export const ja = defineLocale({
       deleteFailed: '削除に失敗しました'
     },
     providers: {
+      accountsOnHost: host => `${host} のアカウント`,
       connectAccount: 'アカウントを接続',
       haveApiKey: 'API キーをお持ちですか？',
       intro:

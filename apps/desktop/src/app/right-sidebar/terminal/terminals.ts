@@ -29,6 +29,7 @@ export interface TerminalEntry {
    *  revived — a fresh shell starts beneath the restored buffer. Captured live
    *  for user tabs only; agent mirrors stay runtime-only. */
   reviveBuffer?: string
+  remoteLabel?: string
   /** `user` = interactive PTY shell. `agent` = read-only mirror of an agent
    *  background process (`terminal(background=true)`), keyed by `procId`. */
   kind: 'user' | 'agent'
@@ -39,6 +40,7 @@ interface PersistedTerminalEntry {
   auto: boolean
   cwd: string
   id: string
+  remoteLabel?: string
   restoreCwd?: string
   reviveBuffer?: string
   title: string
@@ -67,6 +69,7 @@ function sanitizePersistedTerminal(value: unknown): PersistedTerminalEntry | nul
   const cwd = typeof record.cwd === 'string' ? record.cwd : ''
   const restoreCwd = typeof record.restoreCwd === 'string' && record.restoreCwd ? record.restoreCwd : undefined
   const reviveBuffer = typeof record.reviveBuffer === 'string' ? record.reviveBuffer : undefined
+  const remoteLabel = typeof record.remoteLabel === 'string' && record.remoteLabel.trim() ? record.remoteLabel.trim() : undefined
 
   if (!id) {
     return null
@@ -76,6 +79,7 @@ function sanitizePersistedTerminal(value: unknown): PersistedTerminalEntry | nul
     auto: typeof record.auto === 'boolean' ? record.auto : true,
     cwd,
     id,
+    ...(remoteLabel ? { remoteLabel } : {}),
     ...(restoreCwd ? { restoreCwd } : {}),
     ...(reviveBuffer ? { reviveBuffer } : {}),
     title: title || 'Terminal'
@@ -124,6 +128,7 @@ function persistTerminals(list: readonly TerminalEntry[], activeTerminalId: null
       auto: term.auto,
       cwd: term.cwd,
       id: term.id,
+      ...(term.remoteLabel ? { remoteLabel: term.remoteLabel } : {}),
       ...(term.restoreCwd ? { restoreCwd: term.restoreCwd } : {}),
       ...(term.reviveBuffer ? { reviveBuffer: term.reviveBuffer } : {}),
       title: term.title
@@ -386,14 +391,39 @@ export function renameTerminal(id: string, title: string): void {
   )
 }
 
+export function formatTerminalTitle(title: string, remoteLabel?: string): string {
+  const host = remoteLabel?.trim()
+
+  if (host && !title.includes(host)) {
+    return `${title} · ${host}`
+  }
+
+  return title
+}
+
 /** A live terminal reports its resolved shell; adopt it as the label only while
  *  the user hasn't named the tab themselves. */
-export function reportTerminalShell(id: string, shell: string): void {
+export function reportTerminalShell(id: string, shell: string, remoteLabel?: string): void {
   const name = shell.trim()
 
-  if (!name) {
+  if (!name && !remoteLabel) {
     return
   }
 
-  $terminals.set($terminals.get().map(term => (term.id === id && term.auto ? { ...term, title: name } : term)))
+  $terminals.set(
+    $terminals.get().map(term => {
+      if (term.id !== id) {
+        return term
+      }
+
+      const nextRemote = remoteLabel?.trim() || term.remoteLabel
+      const baseTitle = term.auto && name && name !== 'ssh' ? name : term.title
+
+      return {
+        ...term,
+        ...(nextRemote ? { remoteLabel: nextRemote } : {}),
+        title: baseTitle
+      }
+    })
+  )
 }

@@ -1,13 +1,30 @@
+import { useStore } from '@nanostores/react'
+
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useI18n } from '@/i18n'
 import { ChevronRight } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { $activeConnectionId, $connectionsRegistry } from '@/store/connections'
 
 import { PAGE_INSET_X } from '../layout-constants'
 import type { OverlayNavGroup, OverlayNavLink } from '../overlays/overlay-split-layout'
 
+export function useActiveRemoteConnectionLabel(): null | string {
+  const registry = useStore($connectionsRegistry)
+  const activeConnectionId = useStore($activeConnectionId)
+  const activeConnection = registry?.connections.find(connection => connection.id === activeConnectionId)
+
+  if (!activeConnection || activeConnection.kind === 'local' || activeConnection.id === 'local') {
+    return null
+  }
+
+  return activeConnection.label
+}
+
 export function SettingsSubpageHeader({ group, child }: { group: OverlayNavGroup; child?: OverlayNavLink }) {
   const { t } = useI18n()
+  const remoteConnectionLabel = useActiveRemoteConnectionLabel()
 
   return (
     <nav
@@ -30,6 +47,11 @@ export function SettingsSubpageHeader({ group, child }: { group: OverlayNavGroup
         <span aria-current="page" className="truncate text-foreground">
           {group.label}
         </span>
+      )}
+      {remoteConnectionLabel && (
+        <Badge className="ml-1" size="xs" variant="muted">
+          {remoteConnectionLabel}
+        </Badge>
       )}
     </nav>
   )

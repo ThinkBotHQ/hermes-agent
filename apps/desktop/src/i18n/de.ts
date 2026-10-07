@@ -2525,6 +2525,7 @@ export const deOverrides = {
       }
     },
     providers: {
+      accountsOnHost: host => `Konten auf ${host}`,
       connectAccount: 'Ein Konto verbinden',
       haveApiKey: 'Haben Sie stattdessen einen API-Key?',
       intro:

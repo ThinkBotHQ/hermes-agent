@@ -9,14 +9,16 @@ interface StatusSectionProps {
    *  `Button` with `size="micro"` + `variant="text"` or `"link"`. */
   accessory?: ReactNode
   children: ReactNode
+  collapsed?: boolean
   /** Optional inline status next to the label (running spinner, etc). */
   collapsedIndicator?: ReactNode
   defaultCollapsed?: boolean
-  /** Compact live content stays visible while the full roster is collapsed. */
-  preview?: ReactNode
   /** Optional glyph between the caret and the label (e.g. a `Codicon`). */
   icon?: ReactNode
   label: ReactNode
+  onToggle?: () => void
+  /** Compact live content stays visible while the full roster is collapsed. */
+  preview?: ReactNode
 }
 
 /**
@@ -28,13 +30,27 @@ interface StatusSectionProps {
 export function StatusSection({
   accessory,
   children,
+  collapsed: controlledCollapsed,
   collapsedIndicator,
   defaultCollapsed = true,
   icon,
   label,
+  onToggle,
   preview
 }: StatusSectionProps) {
-  const [collapsed, setCollapsed] = useState(defaultCollapsed)
+  const [uncontrolledCollapsed, setUncontrolledCollapsed] = useState(defaultCollapsed)
+  const isControlled = typeof controlledCollapsed === 'boolean'
+  const collapsed = isControlled ? controlledCollapsed : uncontrolledCollapsed
+
+  const handleToggle = () => {
+    if (onToggle) {
+      onToggle()
+    }
+
+    if (!isControlled) {
+      setUncontrolledCollapsed(open => !open)
+    }
+  }
 
   return (
     <div data-slot="status-section">
@@ -42,7 +58,7 @@ export function StatusSection({
         <button
           aria-expanded={!collapsed}
           className="status-section-trigger flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left text-xs font-normal text-muted-foreground/92 transition-colors hover:text-foreground/90"
-          onClick={() => setCollapsed(open => !open)}
+          onClick={handleToggle}
           type="button"
         >
           <DisclosureCaret className="shrink-0" open={!collapsed} size="1em" />

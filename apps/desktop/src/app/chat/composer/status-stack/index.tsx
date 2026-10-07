@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router'
 import { COMPOSER_AREAS } from '@/app/chat/composer/contrib'
 import { blurComposerInput } from '@/app/chat/composer/focus'
 import { useComposerSurfaceId } from '@/app/chat/composer/scope'
+import { openConductorPane } from '@/app/chat/conductor-pane'
 import { useSessionView } from '@/app/chat/session-view'
 import { AGENTS_ROUTE } from '@/app/routes'
 import type { SubmitTextOptions } from '@/app/session/hooks/use-prompt-actions/utils'
@@ -33,25 +34,25 @@ import {
   type StatusGroup,
   stopBackgroundProcess
 } from '@/store/composer-status'
+import { $todoSectionCollapsed } from '@/store/composer-status-drawer'
+import { $conductorBuildBySession } from '@/store/conductor-build'
 import { $freeTierRoute, $freeTierStatus, freeTierStripPending } from '@/store/free-tier'
 import { $interfaceMode, shownInMode, type Tiered } from '@/store/interface-mode'
 import { $previewStatusBySession, dismissPreviewArtifact } from '@/store/preview-status'
 import { $sessionControlBySession, refreshSessionControl } from '@/store/session-control'
-import { $conductorBuildBySession } from '@/store/conductor-build'
 import { knownOwnerForSession } from '@/store/session-states'
 import { $threadScrolledUpBySession } from '@/store/thread-scroll'
 import { openSessionInNewWindow } from '@/store/windows'
 
+import { ConductorBuildStrip } from './conductor-build-strip'
 import { PreviewStatusRow } from './preview-row'
+import { RelayJobsSection } from './relay-jobs-section'
 import { SessionControlSections } from './session-control'
 import { useSessionValue } from './session-control-utils'
 import { StatusItemRow } from './status-row'
 import { SubagentSection } from './subagent-section'
-import { RelayJobsSection } from './relay-jobs-section'
-import { useSubagentSnapshot } from './use-subagent-snapshot'
-import { ConductorBuildStrip } from './conductor-build-strip'
 import { useConductorBuild } from './use-conductor-build'
-import { openConductorPane } from '@/app/chat/conductor-pane'
+import { useSubagentSnapshot } from './use-subagent-snapshot'
 
 // Slow safety-net poll for silent exits (processes without notify_on_complete
 // emit no event when they die). Only armed while a running row is on screen.
@@ -128,6 +129,7 @@ interface ComposerStatusStackProps {
 export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStatusStackProps) {
   const { t } = useI18n()
   const navigate = useNavigate()
+  const todoSectionCollapsed = useStore($todoSectionCollapsed)
   const storedSessionId = useStore(useSessionView().$storedId)
   const interfaceMode = useStore($interfaceMode)
   const shown = useMemo(() => shownInMode(interfaceMode), [interfaceMode])
@@ -144,6 +146,7 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
   const items = useSessionSlice($statusItemsBySession, sessionId)
   const previews = useSessionSlice($previewStatusBySession, sessionId)
   const controlEntry = useSessionValue($sessionControlBySession, sessionId)
+
   const conductorBuild = useStoreSelector($conductorBuildBySession, builds =>
     sessionId ? builds[sessionId] ?? null : null
   )
@@ -309,7 +312,14 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
               />
             ) : undefined
           }
-          defaultCollapsed={group.type !== 'todo'}
+          {...(group.type === 'todo'
+            ? {
+                collapsed: todoSectionCollapsed,
+                onToggle: () => $todoSectionCollapsed.set(!todoSectionCollapsed)
+              }
+            : {
+                defaultCollapsed: true
+              })}
           icon={<Codicon className="text-muted-foreground/70" name={GROUP_ICON[group.type]} size="0.8rem" />}
           label={groupLabel(group, t.statusStack)}
         >

@@ -14,13 +14,18 @@ const startManualProviderOAuth = vi.fn()
 const startManualLocalEndpoint = vi.fn()
 const onboarding = atom({ manual: false })
 
-vi.mock('@/store/profile', () => ({
-  $activeGatewayProfile: atom('alpha'),
-  $profiles: atom([]),
-  refreshProfiles: async () => {},
-  normalizeProfileKey: (p: string | null) => p || 'default',
-  profileLabel: (p: { display_name?: string; name: string }) => p.display_name || p.name
-}))
+vi.mock('@/store/profile', async importOriginal => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+
+  return {
+    ...actual,
+    $activeGatewayProfile: atom('alpha'),
+    $profiles: atom([]),
+    normalizeProfileKey: (p: string | null) => p || 'default',
+    profileLabel: (p: { display_name?: string; name: string }) => p.display_name || p.name,
+    refreshProfiles: async () => {}
+  }
+})
 
 vi.mock('@/hermes', () => ({
   setApiRequestProfile: vi.fn(),
@@ -291,5 +296,66 @@ describe('ProvidersSettings', () => {
     fireEvent.click(row)
 
     await waitFor(() => expect(startManualLocalEndpoint).toHaveBeenCalledWith(null))
+  })
+
+  it('renders connection name in accounts heading for remote connection and original heading for local', async () => {
+    const { $connectionsRegistry } = await import('@/store/connections')
+    const { $connection } = await import('@/store/session')
+
+    // Local connection: renders "Connect an account"
+    $connection.set({ connectionId: 'local', mode: 'local' } as never)
+    $connectionsRegistry.set({
+      connections: [
+        {
+          authMode: 'token',
+          id: 'local',
+          kind: 'local',
+          label: 'This device',
+          tokenPreview: null,
+          tokenSet: false
+        }
+      ],
+      lastUsed: 'local',
+      launchMode: 'primary',
+      primary: 'local',
+      secureTokenStorage: false,
+      version: 2
+    })
+
+    const { unmount } = await renderProvidersSettings()
+    expect(await screen.findByText('Connect an account')).toBeTruthy()
+    unmount()
+
+    // Remote connection: renders "Accounts on Fly Host"
+    $connection.set({ connectionId: 'fly', mode: 'remote' } as never)
+    $connectionsRegistry.set({
+      connections: [
+        {
+          authMode: 'token',
+          id: 'local',
+          kind: 'local',
+          label: 'This device',
+          tokenPreview: null,
+          tokenSet: false
+        },
+        {
+          authMode: 'token',
+          id: 'fly',
+          kind: 'remote',
+          label: 'Fly Host',
+          tokenPreview: null,
+          tokenSet: false
+        }
+      ],
+      lastUsed: 'fly',
+      launchMode: 'primary',
+      primary: 'local',
+      secureTokenStorage: false,
+      version: 2
+    })
+
+    await renderProvidersSettings()
+    expect(await screen.findByText('Accounts on Fly Host')).toBeTruthy()
+    expect(screen.queryByText('Connect an account')).toBeNull()
   })
 })

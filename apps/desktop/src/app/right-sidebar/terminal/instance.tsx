@@ -48,7 +48,7 @@ export function TerminalInstance({
     onAddSelectionToChat,
     restoreCwd,
     reviveBuffer,
-    onShell: shell => reportTerminalShell(id, shell)
+    onShell: (shell, remoteLabel) => reportTerminalShell(id, shell, remoteLabel)
   })
 
   return (

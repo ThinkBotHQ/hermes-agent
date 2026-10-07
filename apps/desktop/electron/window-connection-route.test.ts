@@ -138,3 +138,37 @@ test('does not match another connection, an unlabelled entry, or a torn-down tun
   assert.equal(registrySshPoolScopeByConnectionId(pool, 'source-b'), null)
   assert.equal(registrySshPoolScopeByConnectionId(pool, 'source-c'), null)
 })
+
+test('routes an ssh-attach connection the same way an ssh connection does and rejects non-ssh kinds', () => {
+  const registry = {
+    primary: 'source-a',
+    connections: [
+      { id: 'source-a', kind: 'ssh' },
+      { id: 'source-attach', kind: 'ssh-attach' },
+      { id: 'source-remote', kind: 'remote' }
+    ]
+  } as never
+
+  assert.equal(
+    registrySshScopeForWindowRoute(
+      {
+        connectionId: 'source-attach',
+        profile: 'worker',
+        registryScoped: true
+      },
+      registry
+    ),
+    'conn:source-attach::worker'
+  )
+  assert.equal(
+    registrySshScopeForWindowRoute(
+      {
+        connectionId: 'source-remote',
+        profile: 'worker',
+        registryScoped: true
+      },
+      registry
+    ),
+    null
+  )
+})
