@@ -202,4 +202,19 @@ describe('session cwd → terminal tab linking', () => {
     reportTerminalShell(termId, 'ssh', 'hermes@tb-worker-host')
     expect($terminals.get().find(t => t.id === termId)?.remoteLabel).toBe('hermes@tb-worker-host')
   })
+
+  it('a local shell clears a remote label left on the same terminal, and the label is never stored', async () => {
+    const { $terminals, createTerminal, formatTerminalTitle, reportTerminalShell } = await loadTerminalStore()
+    const termId = createTerminal('/repo')
+
+    reportTerminalShell(termId, 'ssh', 'hermes@tb-worker-host')
+    expect(JSON.stringify(window.localStorage)).not.toContain('hermes@tb-worker-host')
+
+    reportTerminalShell(termId, 'zsh')
+
+    const term = $terminals.get().find(t => t.id === termId)
+
+    expect(term?.remoteLabel).toBeUndefined()
+    expect(formatTerminalTitle(term?.title ?? '', term?.remoteLabel)).toBe('zsh')
+  })
 })

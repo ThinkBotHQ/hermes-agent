@@ -69,7 +69,6 @@ function sanitizePersistedTerminal(value: unknown): PersistedTerminalEntry | nul
   const cwd = typeof record.cwd === 'string' ? record.cwd : ''
   const restoreCwd = typeof record.restoreCwd === 'string' && record.restoreCwd ? record.restoreCwd : undefined
   const reviveBuffer = typeof record.reviveBuffer === 'string' ? record.reviveBuffer : undefined
-  const remoteLabel = typeof record.remoteLabel === 'string' && record.remoteLabel.trim() ? record.remoteLabel.trim() : undefined
 
   if (!id) {
     return null
@@ -79,7 +78,6 @@ function sanitizePersistedTerminal(value: unknown): PersistedTerminalEntry | nul
     auto: typeof record.auto === 'boolean' ? record.auto : true,
     cwd,
     id,
-    ...(remoteLabel ? { remoteLabel } : {}),
     ...(restoreCwd ? { restoreCwd } : {}),
     ...(reviveBuffer ? { reviveBuffer } : {}),
     title: title || 'Terminal'
@@ -128,7 +126,6 @@ function persistTerminals(list: readonly TerminalEntry[], activeTerminalId: null
       auto: term.auto,
       cwd: term.cwd,
       id: term.id,
-      ...(term.remoteLabel ? { remoteLabel: term.remoteLabel } : {}),
       ...(term.restoreCwd ? { restoreCwd: term.restoreCwd } : {}),
       ...(term.reviveBuffer ? { reviveBuffer: term.reviveBuffer } : {}),
       title: term.title
@@ -406,9 +403,7 @@ export function formatTerminalTitle(title: string, remoteLabel?: string): string
 export function reportTerminalShell(id: string, shell: string, remoteLabel?: string): void {
   const name = shell.trim()
 
-  if (!name && !remoteLabel) {
-    return
-  }
+  const host = remoteLabel?.trim() || undefined
 
   $terminals.set(
     $terminals.get().map(term => {
@@ -416,12 +411,15 @@ export function reportTerminalShell(id: string, shell: string, remoteLabel?: str
         return term
       }
 
-      const nextRemote = remoteLabel?.trim() || term.remoteLabel
+      // The label is where THIS shell runs, as reported at start. A local
+      // shell must clear a label left by an earlier remote one; it is runtime
+      // state and is never restored from storage.
+      const { remoteLabel: _previous, ...rest } = term
       const baseTitle = term.auto && name && name !== 'ssh' ? name : term.title
 
       return {
-        ...term,
-        ...(nextRemote ? { remoteLabel: nextRemote } : {}),
+        ...rest,
+        ...(host ? { remoteLabel: host } : {}),
         title: baseTitle
       }
     })
