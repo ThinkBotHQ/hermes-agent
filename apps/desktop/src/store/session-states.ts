@@ -428,17 +428,31 @@ function hasCompletedAssistantReply(state: ClientSessionState): boolean {
     return false
   }
 
-  const lastAssistant = messages.findLast(message => message?.role === 'assistant')
+  const lastAssistantIndex = messages.findLastIndex(message => message?.role === 'assistant')
 
-  if (!lastAssistant) {
+  if (lastAssistantIndex < 0) {
     return false
   }
 
+  const hasUserFollowup = messages.slice(lastAssistantIndex + 1).some(message => message?.role === 'user')
+
+  if (hasUserFollowup) {
+    return false
+  }
+
+  const lastAssistant = messages[lastAssistantIndex]
   const authoritative = lastAssistant.durableComplete === true || lastAssistant.persistedTurn?.complete === true
   const startedAt = state.turnStartedAt
   const completedAt = lastAssistant.completedAt
 
-  return authoritative && startedAt !== null && completedAt !== undefined && completedAt * 1000 >= startedAt
+  return (
+    authoritative &&
+    !lastAssistant.error &&
+    !lastAssistant.errorSurface &&
+    startedAt !== null &&
+    completedAt !== undefined &&
+    Math.round(completedAt * 1000) > startedAt
+  )
 }
 
 function isLiveTurnAwaitingEvents(state: ClientSessionState | undefined): boolean {
@@ -503,11 +517,13 @@ function finalizeSilentLiveTurn(runtimeId: string, current: ClientSessionState):
 function inFlightTurnKey(messages: ChatMessage[]): string | null {
   const lastUser = messages.findLast(message => message.role === 'user')
 
-  return lastUser?.rowId ? `user-row:${lastUser.rowId}` : null
+  return lastUser?.rowId !== undefined ? `user-row:${lastUser.rowId}` : null
 }
 
 function assistantRowIds(messages: ChatMessage[]): number[] {
-  return messages.flatMap(message => (message.role === 'assistant' && message.rowId ? [message.rowId] : []))
+  return messages.flatMap(message =>
+    message.role === 'assistant' && message.rowId !== undefined ? [message.rowId] : []
+  )
 }
 
 function replacePendingTail(current: ChatMessage[], persisted: ChatMessage[], turnKey: string): ChatMessage[] {
@@ -937,7 +953,11 @@ function runtimeReferenced(runtimeId: string, storedSessionId: null | string): b
  *  `needsInput` states stay — the sidebar's attention dot reads them. */
 function evictable(runtimeId: string, state: ClientSessionState): boolean {
   return (
-    !state.busy && !state.needsInput && !state.awaitingResponse && !runtimeReferenced(runtimeId, state.storedSessionId)
+    !state.busy &&
+    !state.needsInput &&
+    !state.awaitingResponse &&
+    !state.turnLive &&
+    !runtimeReferenced(runtimeId, state.storedSessionId)
   )
 }
 

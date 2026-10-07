@@ -291,6 +291,8 @@ describe('live turn event silence', () => {
   })
 
   it('adopts the completed persisted reply when the renderer missed completion', async () => {
+    $activeSessionId.set('rt-complete')
+
     const persisted = [
       { id: 'u1', rowId: 1, parts: [{ type: 'text' as const, text: 'help me' }], role: 'user' as const },
       {
@@ -379,8 +381,10 @@ describe('live turn event silence', () => {
   })
 
   it('falls back to the interrupted state when persistence reconciliation rejects or times out', async () => {
+    $activeSessionId.set('rt-reject')
+
     const pending = new Promise<never>(() => undefined)
-    const reconcile = vi.fn().mockReturnValueOnce(Promise.reject(new Error('offline'))).mockReturnValue(pending)
+    const reconcile = vi.fn().mockRejectedValueOnce(new Error('offline')).mockReturnValue(pending)
     setSessionTurnReconciler(reconcile)
 
     publishSessionState('rt-reject', partial('partial', { storedSessionId: 's-reject' }))
@@ -388,6 +392,8 @@ describe('live turn event silence', () => {
     await vi.advanceTimersByTimeAsync(SILENCE_MS)
     expect($sessionStates.get()['rt-reject']?.messages.some(message => message.errorSurface)).toBe(true)
     expect($sessionStates.get()['rt-reject']?.turnLive).toBe(false)
+
+    $activeSessionId.set('rt-timeout')
 
     publishSessionState('rt-timeout', partial('partial', { storedSessionId: 's-timeout' }))
     noteSessionEvent('rt-timeout')
@@ -420,6 +426,8 @@ describe('live turn event silence', () => {
       ['rt-backend-start', null],
       ['rt-queued-start', queued]
     ] as const) {
+      $activeSessionId.set(runtimeId)
+
       publishSessionState(
         runtimeId,
         state({
@@ -450,7 +458,7 @@ describe('live turn event silence', () => {
 
     noteSessionEvent('rt-race')
     resolve({ complete: true, messages: [], turnKey: 'message:u1' })
-    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(0)
 
     expect($sessionStates.get()['rt-race']?.messages.some(message => message.errorSurface)).toBe(false)
     expect($sessionStates.get()['rt-race']?.turnLive).toBe(true)
