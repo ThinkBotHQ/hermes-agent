@@ -14,7 +14,8 @@ import {
   noteSessionEvent,
   publishSessionState,
   reconcileBusyStatesOnReconnect,
-  SESSION_WATCHDOG_TIMEOUT_MS
+  SESSION_WATCHDOG_TIMEOUT_MS,
+  setSessionTurnReconciler
 } from './session-states'
 
 // Read from the store rather than restated here: these assert what happens on
@@ -41,6 +42,7 @@ describe('session watchdog', () => {
     $unreadFinishedSessionIds.set([])
     $selectedStoredSessionId.set(null)
     $activeSessionId.set(null)
+    setSessionTurnReconciler(null)
   })
 
   it('marks a silent session stalled without pretending it finished', () => {
@@ -159,6 +161,7 @@ describe('live turn event silence', () => {
     $unreadFinishedSessionIds.set([])
     $selectedStoredSessionId.set(null)
     $activeSessionId.set(null)
+    setSessionTurnReconciler(vi.fn().mockResolvedValue({ complete: false, messages: [] }))
   })
 
   afterEach(() => {
@@ -168,14 +171,15 @@ describe('live turn event silence', () => {
     $unreadFinishedSessionIds.set([])
     $selectedStoredSessionId.set(null)
     $activeSessionId.set(null)
+    setSessionTurnReconciler(null)
   })
 
-  it('force-settles a silent live turn even after a partial payload and offers retry', () => {
+  it('force-settles a silent live turn even after a partial payload and offers retry', async () => {
     $activeSessionId.set('rt1')
     publishSessionState('rt1', partial('partial answer', { model: 'glm-5.3-flash', storedSessionId: 's1' }))
     noteSessionEvent('rt1')
 
-    vi.advanceTimersByTime(SILENCE_MS)
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
 
     const settled = $sessionStates.get().rt1
     expect($workingSessionIds.get()).not.toContain('s1')
@@ -195,12 +199,12 @@ describe('live turn event silence', () => {
     expect(failed?.error).not.toMatch(/glm|deepseek|interrupted mid-run/i)
   })
 
-  it('does not latch the owner-Stop interrupt when it settles, so a recovered reply still draws', () => {
+  it('does not latch the owner-Stop interrupt when it settles, so a recovered reply still draws', async () => {
     $activeSessionId.set('rt-recover')
     publishSessionState('rt-recover', partial('before the crash', { storedSessionId: 's-recover' }))
     noteSessionEvent('rt-recover')
 
-    vi.advanceTimersByTime(SILENCE_MS)
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
 
     const settled = $sessionStates.get()['rt-recover']
     expect(settled?.busy).toBe(false)
@@ -210,7 +214,7 @@ describe('live turn event silence', () => {
     expect(settled?.interrupted).toBe(false)
   })
 
-  it('force-settles a silent live turn that never produced a payload', () => {
+  it('force-settles a silent live turn that never produced a payload', async () => {
     $activeSessionId.set('rt-empty')
     publishSessionState(
       'rt-empty',
@@ -218,7 +222,7 @@ describe('live turn event silence', () => {
     )
     noteSessionEvent('rt-empty')
 
-    vi.advanceTimersByTime(SILENCE_MS)
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
 
     const settled = $sessionStates.get()['rt-empty']
     expect($workingSessionIds.get()).not.toContain('s-empty')
@@ -229,38 +233,38 @@ describe('live turn event silence', () => {
     expect(errorRecoveryPlan(failed?.errorSurface).retry).toBe(true)
   })
 
-  it('does not settle a live turn that keeps producing events', () => {
+  it('does not settle a live turn that keeps producing events', async () => {
     publishSessionState('rt-live', partial('still working', { storedSessionId: 's-live' }))
     noteSessionEvent('rt-live')
 
-    vi.advanceTimersByTime(SILENCE_MS - 1)
+    await vi.advanceTimersByTimeAsync(SILENCE_MS - 1)
     noteSessionEvent('rt-live')
-    vi.advanceTimersByTime(SILENCE_MS - 1)
+    await vi.advanceTimersByTimeAsync(SILENCE_MS - 1)
 
     expect($workingSessionIds.get()).toContain('s-live')
     expect($sessionStates.get()['rt-live']?.messages.some(message => message.errorSurface)).toBe(false)
   })
 
-  it('does not settle a turn the user is still answering', () => {
+  it('does not settle a turn the user is still answering', async () => {
     publishSessionState('rt-ask', partial('need a choice', { needsInput: true, storedSessionId: 's-ask' }))
     noteSessionEvent('rt-ask')
 
-    vi.advanceTimersByTime(SILENCE_MS)
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
 
     expect($workingSessionIds.get()).toContain('s-ask')
     expect($sessionStates.get()['rt-ask']?.messages.some(message => message.errorSurface)).toBe(false)
   })
 
-  it('settles only the session that stopped producing events', () => {
+  it('settles only the session that stopped producing events', async () => {
     $activeSessionId.set('rt-a')
     publishSessionState('rt-a', partial('a', { storedSessionId: 's-a' }))
     publishSessionState('rt-b', partial('b', { storedSessionId: 's-b' }))
     noteSessionEvent('rt-a')
     noteSessionEvent('rt-b')
 
-    vi.advanceTimersByTime(SILENCE_MS - 1)
+    await vi.advanceTimersByTimeAsync(SILENCE_MS - 1)
     noteSessionEvent('rt-b')
-    vi.advanceTimersByTime(1)
+    await vi.advanceTimersByTimeAsync(1)
 
     expect($workingSessionIds.get()).not.toContain('s-a')
     expect($workingSessionIds.get()).toContain('s-b')
@@ -286,49 +290,50 @@ describe('live turn event silence', () => {
     expect($workingSessionIds.get()).not.toContain('s-done')
   })
 
-  it('does not set a cut-off error when a turn with a completed reply experiences a connection drop', () => {
-    $activeSessionId.set('rt-complete')
+  it('adopts the completed persisted reply when the renderer missed completion', async () => {
+    const persisted = [
+      { id: 'u1', rowId: 1, parts: [{ type: 'text' as const, text: 'help me' }], role: 'user' as const },
+      {
+        id: 'a1-durable',
+        rowId: 2,
+        parts: [{ type: 'text' as const, text: 'Here is the complete solution.' }],
+        pending: false,
+        role: 'assistant' as const
+      }
+    ]
 
-    const completedTurn: ClientSessionState = state({
-      awaitingResponse: false,
-      busy: true,
+    const reconcile = vi.fn().mockResolvedValue({ complete: true, messages: persisted, turnKey: 'row:1' })
+    setSessionTurnReconciler(reconcile)
+
+    const live = partial('Here is the complete solution.', {
       messages: [
-        {
-          id: 'u1',
-          parts: [{ type: 'text', text: 'help me' }],
-          role: 'user'
-        },
-        {
-          completedAt: Date.now() / 1000,
-          durableComplete: true,
-          id: 'a1',
-          parts: [{ type: 'text', text: 'Here is the complete solution.' }],
-          pending: false,
-          role: 'assistant'
-        }
+        { id: 'u1', rowId: 1, parts: [{ type: 'text', text: 'help me' }], role: 'user' },
+        { id: 'a1', parts: [{ type: 'text', text: 'Here is the complete solution.' }], pending: true, role: 'assistant' }
       ],
-      model: 'glm-5.3-flash',
-      sawAssistantPayload: true,
-      storedSessionId: 's-complete',
-      streamId: null,
-      turnLive: true,
-      turnStartedAt: Date.now()
+      storedSessionId: 's-complete'
     })
 
-    publishSessionState('rt-complete', completedTurn)
+    publishSessionState('rt-complete', live)
+    reconcileBusyStatesOnReconnect()
     noteSessionEvent('rt-complete')
 
-    // Connection drops and reconnects, or silence timer expires
-    reconcileBusyStatesOnReconnect()
-    vi.advanceTimersByTime(SILENCE_MS)
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
 
     const settled = $sessionStates.get()['rt-complete']
+    expect(reconcile).toHaveBeenCalledWith({
+      baselineAssistantRowIds: [],
+      sessionId: 's-complete',
+      turnKey: 'user-row:1'
+    })
+    expect(settled?.messages).toEqual(persisted)
     expect(settled?.messages.some(message => message.errorSurface)).toBe(false)
-    expect(settled?.messages.some(message => message.id.startsWith('assistant-interrupted'))).toBe(false)
-    expect(settled?.messages).toHaveLength(2)
+    expect(settled?.messages.every(message => !message.pending)).toBe(true)
+    expect(settled?.busy).toBe(false)
+    expect(settled?.awaitingResponse).toBe(false)
+    expect(settled?.turnLive).toBe(false)
   })
 
-  it('sets a visible interrupted state with continue recovery when connection drops mid-stream with no terminal event', () => {
+  it('sets a visible interrupted state when persistence says the turn is incomplete', async () => {
     $activeSessionId.set('rt-midstream')
 
     const midstreamTurn: ClientSessionState = state({
@@ -358,9 +363,8 @@ describe('live turn event silence', () => {
     publishSessionState('rt-midstream', midstreamTurn)
     noteSessionEvent('rt-midstream')
 
-    // Connection drops mid-stream with nothing persisted
-    reconcileBusyStatesOnReconnect()
-    vi.advanceTimersByTime(SILENCE_MS)
+    setSessionTurnReconciler(vi.fn().mockResolvedValue({ complete: false, messages: [], turnKey: 'row:1' }))
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
 
     const settled = $sessionStates.get()['rt-midstream']
     const failed = settled?.messages.find(message => message.errorSurface)
@@ -372,5 +376,83 @@ describe('live turn event silence', () => {
     const plan = errorRecoveryPlan(failed?.errorSurface)
     expect(plan.retry).toBe(true)
     expect(failed?.error).toBe('The connection dropped before the reply finished.')
+  })
+
+  it('falls back to the interrupted state when persistence reconciliation rejects or times out', async () => {
+    const pending = new Promise<never>(() => undefined)
+    const reconcile = vi.fn().mockReturnValueOnce(Promise.reject(new Error('offline'))).mockReturnValue(pending)
+    setSessionTurnReconciler(reconcile)
+
+    publishSessionState('rt-reject', partial('partial', { storedSessionId: 's-reject' }))
+    noteSessionEvent('rt-reject')
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
+    expect($sessionStates.get()['rt-reject']?.messages.some(message => message.errorSurface)).toBe(true)
+    expect($sessionStates.get()['rt-reject']?.turnLive).toBe(false)
+
+    publishSessionState('rt-timeout', partial('partial', { storedSessionId: 's-timeout' }))
+    noteSessionEvent('rt-timeout')
+    await vi.advanceTimersByTimeAsync(SILENCE_MS + 5000)
+    expect($sessionStates.get()['rt-timeout']?.messages.some(message => message.errorSurface)).toBe(true)
+    expect($sessionStates.get()['rt-timeout']?.turnLive).toBe(false)
+  })
+
+  it('keeps liveness for a new turn after a completed reply, including queued follow-ups', async () => {
+    setSessionTurnReconciler(vi.fn().mockResolvedValue({ complete: false, messages: [], turnKey: 'message:user-queued-followup' }))
+
+    const previous = {
+      completedAt: Date.now() / 1000,
+      durableComplete: true,
+      id: 'a-previous',
+      rowId: 2,
+      parts: [{ type: 'text' as const, text: 'Previous complete answer.' }],
+      pending: false,
+      role: 'assistant' as const
+    }
+
+    const queued = {
+      id: 'user-queued-followup',
+      rowId: 3,
+      parts: [{ type: 'text' as const, text: 'follow up' }],
+      role: 'user' as const
+    }
+
+    for (const [runtimeId, followup] of [
+      ['rt-backend-start', null],
+      ['rt-queued-start', queued]
+    ] as const) {
+      publishSessionState(
+        runtimeId,
+        state({
+          busy: true,
+          messages: [
+            { id: 'u1', rowId: 1, parts: [{ type: 'text', text: 'first prompt' }], role: 'user' },
+            previous,
+            ...(followup ? [followup] : [])
+          ],
+          storedSessionId: runtimeId,
+          turnStartedAt: Date.now(),
+          turnLive: true
+        })
+      )
+      noteSessionEvent(runtimeId)
+      await vi.advanceTimersByTimeAsync(SILENCE_MS)
+      expect($sessionStates.get()[runtimeId]?.messages.some(message => message.errorSurface)).toBe(true)
+      expect($sessionStates.get()[runtimeId]?.turnLive).toBe(false)
+    }
+  })
+
+  it('ignores a reconcile result when another session event arrives during the request', async () => {
+    let resolve!: (value: { complete: true; messages: [] ; turnKey: string }) => void
+    setSessionTurnReconciler(() => new Promise(done => { resolve = done }))
+    publishSessionState('rt-race', partial('partial', { storedSessionId: 's-race' }))
+    noteSessionEvent('rt-race')
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
+
+    noteSessionEvent('rt-race')
+    resolve({ complete: true, messages: [], turnKey: 'message:u1' })
+    await Promise.resolve()
+
+    expect($sessionStates.get()['rt-race']?.messages.some(message => message.errorSurface)).toBe(false)
+    expect($sessionStates.get()['rt-race']?.turnLive).toBe(true)
   })
 })

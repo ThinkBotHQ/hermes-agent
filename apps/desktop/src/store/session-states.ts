@@ -19,6 +19,7 @@
 import { type GatewayEvent, LOCAL_CONNECTION_ID, registryBackendScopeKey } from '@hermes/shared'
 import { atom, computed } from 'nanostores'
 
+import { getLatestSessionMessages } from '@/api/sessions'
 import { routeSessionId } from '@/app/routes'
 import type { ClientSessionState } from '@/app/types'
 import { findGroupOfPane, type LayoutNode } from '@/components/pane-shell/tree/model'
@@ -32,7 +33,7 @@ import {
 } from '@/components/pane-shell/tree/store'
 import { resolveRememberedActivePane, workspaceScopeKey } from '@/components/pane-shell/workspace-scope'
 import type { WorkspaceMode } from '@/contrib/types'
-import type { ChatMessage } from '@/lib/chat-messages'
+import { type ChatMessage, chatMessageText, toChatMessages } from '@/lib/chat-messages'
 import type { ErrorSurface } from '@/lib/error-surface'
 import { stableArray } from '@/lib/stable-array'
 import { readJson, writeJson } from '@/lib/storage'
@@ -96,6 +97,47 @@ export const $sessionStates = atom<Record<string, ClientSessionState>>({})
 // ---------------------------------------------------------------------------
 
 const sessionScopeByRuntimeId = new Map<string, string>()
+type SessionTurnReconcileRequest = {
+  baselineAssistantRowIds: number[]
+  sessionId: string
+  turnKey: string | null
+}
+
+type SessionTurnReconcileResult = { complete: boolean; messages: ChatMessage[] }
+type SessionTurnReconciler = (request: SessionTurnReconcileRequest) => Promise<SessionTurnReconcileResult>
+
+const fetchPersistedSessionTurn: SessionTurnReconciler = async ({ baselineAssistantRowIds, sessionId, turnKey }) => {
+  const response = await getLatestSessionMessages(sessionId, knownOwnerForSession(sessionId))
+  const messages = toChatMessages(response.messages)
+
+  if (!turnKey?.startsWith('user-row:')) {
+    return { complete: false, messages }
+  }
+
+  const userRowId = Number(turnKey.slice('user-row:'.length))
+  const userIndex = messages.findIndex(message => message.role === 'user' && message.rowId === userRowId)
+  const turnEnd = userIndex < 0 ? -1 : messages.findIndex((message, index) => index > userIndex && message.role === 'user')
+  const persistedTurnMessages = userIndex < 0 ? [] : messages.slice(userIndex + 1, turnEnd < 0 ? undefined : turnEnd)
+
+  const candidate = persistedTurnMessages.findLast(message =>
+    message.role === 'assistant' &&
+    message.rowId !== undefined &&
+    !baselineAssistantRowIds.includes(message.rowId) &&
+    !message.error &&
+    !message.errorSurface &&
+    chatMessageText(message).trim().length > 0
+  )
+
+  return { complete: Boolean(candidate), messages }
+}
+
+let sessionTurnReconciler: SessionTurnReconciler = fetchPersistedSessionTurn
+const sessionEventRevisionByRuntimeId = new Map<string, number>()
+
+/** Inject the durable history read in store tests; null restores the real REST reader. */
+export function setSessionTurnReconciler(reconciler: null | SessionTurnReconciler): void {
+  sessionTurnReconciler = reconciler ?? fetchPersistedSessionTurn
+}
 
 // Structured twin of the scope ledger: inbound events can carry either an
 // exact (connectionId, profile) owner or a producer-proven profile-only pool
@@ -379,67 +421,34 @@ function clearEventSilence(runtimeId: string) {
   }
 }
 
-function hasCompletedAssistantReply(messages: ChatMessage[] | undefined): boolean {
+function hasCompletedAssistantReply(state: ClientSessionState): boolean {
+  const messages = state.messages
+
   if (!Array.isArray(messages) || messages.length === 0) {
     return false
   }
 
-  const lastUserIndex = messages.findLastIndex(
-    message => message?.role === 'user' && !message?.id?.startsWith('user-queued-')
-  )
-
-  const turnMessages = lastUserIndex >= 0 ? messages.slice(lastUserIndex + 1) : messages
-  const lastAssistant = turnMessages.findLast(message => message?.role === 'assistant')
+  const lastAssistant = messages.findLast(message => message?.role === 'assistant')
 
   if (!lastAssistant) {
     return false
   }
 
-  if (lastAssistant.durableComplete === true || lastAssistant.persistedTurn?.complete === true) {
-    return true
-  }
+  const authoritative = lastAssistant.durableComplete === true || lastAssistant.persistedTurn?.complete === true
+  const startedAt = state.turnStartedAt
+  const completedAt = lastAssistant.completedAt
 
-  if (lastAssistant.error || lastAssistant.errorSurface) {
-    return false
-  }
-
-  const hasText =
-    Array.isArray(lastAssistant.parts) &&
-    lastAssistant.parts.some(
-      part => part?.type === 'text' && typeof part.text === 'string' && part.text.trim().length > 0
-    )
-
-  const hasOpenTools =
-    Array.isArray(lastAssistant.parts) &&
-    lastAssistant.parts.some(
-      part => part?.type === 'tool-call' && part.completedAt === undefined && part.result === undefined
-    )
-
-  return !lastAssistant.interim && !lastAssistant.pending && hasText && !hasOpenTools
+  return authoritative && startedAt !== null && completedAt !== undefined && completedAt * 1000 >= startedAt
 }
 
 function isLiveTurnAwaitingEvents(state: ClientSessionState | undefined): boolean {
-  if (!state || state.needsInput) {
-    return false
-  }
-
-  if (hasCompletedAssistantReply(state.messages)) {
-    return false
-  }
-
-  return Boolean(state.busy || state.awaitingResponse || state.turnLive)
+  return Boolean(state && (state.busy || state.awaitingResponse || state.turnLive) && !state.needsInput)
 }
 
 const SILENT_TURN_RETRY: ErrorSurface = { code: 'stream_drop', layer: 'streaming', retryable: true }
 
 function withSilentTurnRetry(messages: ChatMessage[], streamId: string | null): ChatMessage[] {
   const occurredAt = Date.now() / 1000
-
-  if (hasCompletedAssistantReply(messages)) {
-    return messages
-      .filter(message => !(message.pending && message.parts.length === 0))
-      .map(message => (message.pending ? { ...message, completedAt: occurredAt, pending: false } : message))
-  }
 
   const error = 'The connection dropped before the reply finished.'
 
@@ -475,30 +484,131 @@ function withSilentTurnRetry(messages: ChatMessage[], streamId: string | null): 
   ]
 }
 
-function settleSilentLiveTurn(runtimeId: string) {
-  const current = $sessionStates.get()[runtimeId]
-
-  if (!current || !isLiveTurnAwaitingEvents(current)) {
-    return
-  }
-
+function finalizeSilentLiveTurn(runtimeId: string, current: ClientSessionState): void {
   publishSessionState(runtimeId, {
     ...current,
     awaitingResponse: false,
     busy: false,
-    // NOT `interrupted: true`. That latch means "the owner pressed Stop": it makes
-    // message.start / deltas / tool events / message.complete for this session get
-    // dropped until the next prompt.submit clears it. A silent turn is not owner
-    // intent. Crash recovery and auto-continue routinely go quiet for longer than
-    // the silence window (backend rebuild, CLI resume, backoff) and then answer;
-    // latching here made that recovered reply invisible until the owner sent
-    // another message. The retry card is enough; fresh events must still draw.
+    // NOT `interrupted: true`. That latch means "the owner pressed Stop" and drops
+    // future events. A silent turn is not owner intent; the visible retry card
+    // preserves recovery while allowing a later crash-recovered reply to draw.
     messages: withSilentTurnRetry(current.messages, current.streamId),
     pendingBranchGroup: null,
     streamId: null,
     turnLive: false,
     turnStartedAt: null
   })
+}
+
+function inFlightTurnKey(messages: ChatMessage[]): string | null {
+  const lastUser = messages.findLast(message => message.role === 'user')
+
+  return lastUser?.rowId ? `user-row:${lastUser.rowId}` : null
+}
+
+function assistantRowIds(messages: ChatMessage[]): number[] {
+  return messages.flatMap(message => (message.role === 'assistant' && message.rowId ? [message.rowId] : []))
+}
+
+function replacePendingTail(current: ChatMessage[], persisted: ChatMessage[], turnKey: string): ChatMessage[] {
+  const userRowId = Number(turnKey.slice('user-row:'.length))
+  const currentUserIndex = current.findIndex(message => message.role === 'user' && message.rowId === userRowId)
+  const persistedUserIndex = persisted.findIndex(message => message.role === 'user' && message.rowId === userRowId)
+
+  if (currentUserIndex < 0 || persistedUserIndex < 0) {
+    return persisted
+  }
+
+  return [...current.slice(0, currentUserIndex), ...persisted.slice(persistedUserIndex)]
+}
+
+async function settleSilentLiveTurn(runtimeId: string): Promise<void> {
+  const current = $sessionStates.get()[runtimeId]
+
+  if (!current || !isLiveTurnAwaitingEvents(current)) {
+    return
+  }
+
+  if (hasCompletedAssistantReply(current)) {
+    clearEventSilence(runtimeId)
+    publishSessionState(runtimeId, {
+      ...current,
+      awaitingResponse: false,
+      busy: false,
+      messages: current.messages.filter(message => !(message.pending && message.parts.length === 0)),
+      pendingBranchGroup: null,
+      streamId: null,
+      turnLive: false,
+      turnStartedAt: null
+    })
+
+    return
+  }
+
+  const storedId = current.storedSessionId
+
+  if (!storedId) {
+    finalizeSilentLiveTurn(runtimeId, current)
+
+    return
+  }
+
+  const eventRevision = sessionEventRevisionByRuntimeId.get(runtimeId) ?? 0
+
+  const request: SessionTurnReconcileRequest = {
+    baselineAssistantRowIds: assistantRowIds(current.messages),
+    sessionId: storedId,
+    turnKey: inFlightTurnKey(current.messages)
+  }
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+
+  const timeout = new Promise<null>(resolve => {
+    timeoutId = setTimeout(() => resolve(null), 5000)
+  })
+
+  try {
+    const result = await Promise.race([sessionTurnReconciler(request), timeout])
+    clearTimeout(timeoutId)
+
+    if ((sessionEventRevisionByRuntimeId.get(runtimeId) ?? 0) !== eventRevision) {
+      return
+    }
+
+    const latest = $sessionStates.get()[runtimeId]
+
+    if (!latest || !isLiveTurnAwaitingEvents(latest)) {
+      return
+    }
+
+    if (result?.complete && request.turnKey) {
+      clearEventSilence(runtimeId)
+      publishSessionState(runtimeId, {
+        ...latest,
+        awaitingResponse: false,
+        busy: false,
+        messages: replacePendingTail(latest.messages, result.messages, request.turnKey),
+        pendingBranchGroup: null,
+        streamId: null,
+        turnLive: false,
+        turnStartedAt: null
+      })
+
+      return
+    }
+
+    finalizeSilentLiveTurn(runtimeId, latest)
+  } catch {
+    clearTimeout(timeoutId)
+
+    if ((sessionEventRevisionByRuntimeId.get(runtimeId) ?? 0) === eventRevision) {
+      const latest = $sessionStates.get()[runtimeId]
+
+      if (latest && isLiveTurnAwaitingEvents(latest)) {
+        finalizeSilentLiveTurn(runtimeId, latest)
+      }
+    }
+  }
 }
 
 /** Record that this session just produced an event. A live turn that then goes
@@ -508,6 +618,8 @@ export function noteSessionEvent(runtimeId: string) {
   if (!runtimeId) {
     return
   }
+
+  sessionEventRevisionByRuntimeId.set(runtimeId, (sessionEventRevisionByRuntimeId.get(runtimeId) ?? 0) + 1)
 
   const current = $sessionStates.get()[runtimeId]
 
@@ -937,6 +1049,7 @@ export function clearAllSessionStates() {
   clearAllProviderWaits()
   sessionScopeByRuntimeId.clear()
   sessionOwnerByRuntimeId.clear()
+  sessionEventRevisionByRuntimeId.clear()
   $stalledSessionIds.set([])
   $sessionStates.set({})
   clearAllBackendTurnStartedAt()
@@ -1068,7 +1181,7 @@ export function reconcileBusyStatesOnReconnect(scope?: string) {
       const published = $sessionStates.get()[runtimeId]
 
       if (published?.busy || published?.awaitingResponse) {
-        const replyCompleted = hasCompletedAssistantReply(published.messages)
+        const replyCompleted = hasCompletedAssistantReply(published)
 
         publishSessionState(runtimeId, {
           ...published,
