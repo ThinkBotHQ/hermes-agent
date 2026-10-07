@@ -8,7 +8,7 @@ import pwd
 import subprocess
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -93,7 +93,11 @@ def _make_marker(home: Path, proj_name: str, run_id: str = "run-1", session_id: 
     state_dir = proj_dir / ".claude" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     marker_path = state_dir / "tb-build-active.json"
-    armed_at_str = kwargs.get("armed_at", "2026-09-29T08:00:00Z")
+    # Default to "armed an hour ago": a fixed calendar date ages past the
+    # abandoned threshold and turns every default marker abandoned.
+    armed_at_str = kwargs.get("armed_at") or (
+        datetime.now(timezone.utc) - timedelta(hours=1)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
     data = {
         "schema": "tb-build/v1",
         "run_id": run_id,
