@@ -6,6 +6,7 @@ import {
   attach,
   AttachIdentityError,
   AttachNoBackendError,
+  attachScopesOwnedBy,
   AttachTokenMismatchError,
   detach,
   planReattach,
@@ -311,4 +312,17 @@ test('reattach plan rejects old primary host after registry edit', () => {
     states, scope: 'conn:lab::default', connectionId: 'lab',
     registryEntry: { id: 'lab', kind: 'ssh-attach', host: 'host-b', port: 2222, user: 'hermes' }
   }), { ok: false, reason: 'state-unavailable' })
+})
+
+test('attachScopesOwnedBy finds the primary scope of a removed connection, not only conn:<id>:: keys', () => {
+  const states = new Map<string, any>([
+    ['', { kind: 'ssh-attach', registryConnectionId: 'lab' }],
+    ['conn:lab::work', { kind: 'ssh-attach', registryConnectionId: 'lab' }],
+    ['conn:other::default', { kind: 'ssh-attach', registryConnectionId: 'other' }],
+    ['legacy', { kind: 'ssh', registryConnectionId: 'lab' }]
+  ])
+
+  assert.deepEqual(attachScopesOwnedBy(states, 'lab'), ['', 'conn:lab::work'])
+  assert.deepEqual(attachScopesOwnedBy(states, ''), [])
+  assert.deepEqual(attachScopesOwnedBy(states, 'missing'), [])
 })

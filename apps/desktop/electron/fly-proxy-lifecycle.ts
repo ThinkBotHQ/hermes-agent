@@ -316,6 +316,20 @@ function checkTcpListening(port: number): Promise<boolean> {
   })
 }
 
+// SIGKILL the supervisor's whole process group (POSIX). The supervisor is a
+// group leader, so this reaches the proxy even before its pid was reported.
+function killProxyGroup(supervisorPid: number): void {
+  if (process.platform === 'win32' || supervisorPid <= 0) {
+    return
+  }
+
+  try {
+    process.kill(-supervisorPid, 'SIGKILL')
+  } catch {
+    // group already gone
+  }
+}
+
 export async function startFlyProxy(
   app: string,
   remotePort: number,
@@ -394,6 +408,8 @@ export async function startFlyProxy(
       }
 
       if (supervisorPid > 0 && !isPidDead(supervisorPid)) {
+        killProxyGroup(supervisorPid)
+
         try {
           process.kill(supervisorPid, 'SIGKILL')
         } catch {
@@ -430,6 +446,8 @@ export async function startFlyProxy(
         // ignore
       }
     }
+
+    killProxyGroup(supervisorPid)
 
     if (supervisorPid > 0 && supervisorPid !== proxyPid) {
       try {
@@ -540,6 +558,9 @@ export async function startFlyProxy(
         String(ownerPid)
       ],
       {
+        // Own process group: a hard kill of the group takes the proxy with the
+        // supervisor even when the supervisor never gets to run its trap.
+        detached: true,
         stdio: ['ignore', 'pipe', 'pipe']
       }
     )

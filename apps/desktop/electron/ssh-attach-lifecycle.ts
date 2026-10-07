@@ -269,6 +269,25 @@ export function planReattach<T extends AttachStateCandidate>(input: {
   return { ok: true, scope: resolved[0], state: resolved[1] }
 }
 
+/**
+ * Every ssh scope whose attach state belongs to a registry connection. The
+ * primary's state lives at the bare primary scope rather than under
+ * `conn:<id>::`, so a prefix match alone misses it when the connection is
+ * removed or re-pointed.
+ */
+export function attachScopesOwnedBy<T extends AttachStateCandidate>(
+  states: Map<string, T>,
+  connectionId: string
+): string[] {
+  if (!connectionId) {
+    return []
+  }
+
+  return [...states]
+    .filter(([, state]) => state.kind === 'ssh-attach' && state.registryConnectionId === connectionId)
+    .map(([scope]) => scope)
+}
+
 export async function detach(
   ssh: Pick<AttachSshConnection, 'cancelForward'>,
   handle: { localPort: number; remotePort: number }

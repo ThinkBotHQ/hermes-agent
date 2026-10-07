@@ -9017,7 +9017,7 @@ async function saveRegistryConnection(input: any = {}) {
       await sshBootstrapCoordinator.cancelAndWait(sshScopeKey(primaryProfileKey()))
     }
 
-    for (const [scope, state] of sshConnections) {
+    for (const [scope, state] of [...sshConnections]) {
       if (state.primaryRegistryScope && state.registryConnectionId === entry.id && state.kind === 'ssh-attach') {
         await sshBootstrapCoordinator.cancelAndWait(scope)
         await teardownSshConnection(scope)
@@ -11846,6 +11846,10 @@ async function stopRegistryConnectionBackends(connectionId) {
 
   const sshScopes = new Set([
     ...[...sshConnections.keys()].filter(scope => String(scope).startsWith(prefix)),
+    // An attach-only primary lives at the bare primary scope, not under
+    // `conn:<id>::`. Without this its state (and any fly proxy it owns)
+    // outlives the connection that was removed or re-pointed.
+    ...sshAttach.attachScopesOwnedBy(sshConnections, connectionId),
     ...[...sshBootstrapCoordinator.active].map(entry => entry.scope).filter(scope => String(scope).startsWith(prefix))
   ])
 
@@ -15265,11 +15269,15 @@ async function reattachAttachOnlyConnection(connection, poolKey?: string) {
     if (state.flyProxyDead || (state.flyProxy && !state.flyProxy.alive()) || !(await state.ssh.isAlive())) {
       await teardownSshConnection(scope)
 
-      return bootstrapSshConnection(scope, connection.ssh, '', source, undefined, {
+      const rebuilt = await bootstrapSshConnection(scope, connection.ssh, '', source, undefined, {
         connectionKind: 'ssh-attach',
         registryConnectionId,
         primaryRegistryScope: state.primaryRegistryScope
       })
+
+      // Same shape as the live path below: the caller's pool identity
+      // (profile, connectionId, remoteProfile) survives the rebuild.
+      return { ...connection, ...rebuilt, attachOnly: true }
     }
 
     const oldForward = { localPort: state.localPort, remotePort: state.remotePort }

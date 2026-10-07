@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
@@ -350,6 +350,38 @@ if (argv[0] === 'proxy') {
     // Calling stop() a second time is fine and resolves without error
     await assert.doesNotReject(() => handle.stop())
   })
+
+  test.skipIf(process.platform === 'win32')(
+    'the proxy runs in its supervisor\'s own process group, so a hard group kill cannot orphan it',
+    async () => {
+      const handle = await startFlyProxy('tb-worker-host', 22, {
+        flyBinary: fakeFlyPath
+      })
+
+      try {
+        const ps = (field: string) =>
+          Number(execFileSync('ps', ['-o', `${field}=`, '-p', String(handle.pid)]).toString().trim())
+
+        const supervisorPid = ps('ppid')
+
+        assert.notEqual(supervisorPid, process.pid)
+        assert.equal(ps('pgid'), supervisorPid)
+
+        process.kill(-supervisorPid, 'SIGKILL')
+
+        const deadline = Date.now() + 3000
+
+        while (Date.now() < deadline && handle.alive()) {
+          await new Promise(resolve => setTimeout(resolve, 50))
+        }
+
+        assert.equal(handle.alive(), false)
+        assert.throws(() => process.kill(handle.pid, 0), /ESRCH/)
+      } finally {
+        await handle.stop()
+      }
+    }
+  )
 
   test.skipIf(process.platform === 'win32')(
     '(f) CRASH: owner killed with -9 causes proxy to exit within 8s',
