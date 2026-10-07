@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 
 import { test } from 'vitest'
 
-import type { ConnectionRegistry } from './connection-registry'
+import type { ConnectionRegistry, RegistryConnection } from './connection-registry'
 import {
   agentHandle,
   backendScopeKey,
@@ -40,6 +40,7 @@ import {
   setPrimaryConnection,
   shouldDeferLocalEnumeration,
   shouldRetrySshInventory,
+  sshAttachDialIdentity,
   uniqueLabel,
   updateEligibility,
   upsertConnection
@@ -2212,4 +2213,95 @@ test('normalizeRegistry quarantines non-object junk items that could still be us
   // null/false carry no data and are dropped; the string is preserved.
   assert.equal((registry.quarantined || []).length, 1)
   assert.equal(registry.quarantined![0].entry, '{ mangled json fragment }')
+})
+
+test('flyApp on ssh-attach: valid round-trips, dropped on ssh, blank removed, invalid rejected', () => {
+  const registry = emptyRegistry()
+
+  // valid flyApp round-trips on ssh-attach
+  const attach = normalizeConnectionInput(
+    { kind: 'ssh-attach', label: 'Fly box', host: 'box', flyApp: 'my-fly-app' },
+    registry
+  )
+
+  assert.equal(attach.flyApp, 'my-fly-app')
+
+  // round-trip through normalizeRegistry
+  const loaded = normalizeRegistry({
+    version: 2,
+    connections: [attach]
+  })
+
+  const loadedAttach = loaded.connections.find(c => c.id === attach.id)
+
+  assert.equal(loadedAttach?.flyApp, 'my-fly-app')
+
+  // dropped on ssh
+  const ssh = normalizeConnectionInput(
+    { kind: 'ssh', label: 'Plain ssh', host: 'box2', flyApp: 'my-fly-app' },
+    registry
+  )
+
+  assert.equal('flyApp' in ssh, false)
+
+  // invalid names rejected ('-x', 'a b', 'a;b', 'UPPER')
+  for (const invalid of ['-x', 'a b', 'a;b', 'UPPER']) {
+    assert.throws(
+      () =>
+        normalizeConnectionInput(
+          { kind: 'ssh-attach', label: `Bad ${invalid}`, host: 'box', flyApp: invalid },
+          registry
+        ),
+      { message: /^Invalid Fly app name/ }
+    )
+  }
+
+  // blank removes it
+  const blank = normalizeConnectionInput(
+    { kind: 'ssh-attach', label: 'Blank fly', host: 'box', flyApp: '   ' },
+    registry
+  )
+
+  assert.equal('flyApp' in blank, false)
+
+  // no-flyApp entry normalizes unchanged (assert with deepEqual against pre-change shape)
+  const noFly = normalizeConnectionInput(
+    { kind: 'ssh-attach', label: 'Standard box', host: 'alice@box:2222' },
+    registry
+  )
+
+  assert.deepEqual(noFly, {
+    host: 'box',
+    id: 'standard-box',
+    kind: 'ssh-attach',
+    label: 'Standard box',
+    port: 2222,
+    user: 'alice'
+  })
+})
+
+test('sshAttachDialIdentity differs when only flyApp differs and when only host differs', () => {
+  const base = { host: 'box1', port: 22, user: 'alice', flyApp: 'app-a' }
+  const diffApp = { ...base, flyApp: 'app-b' }
+  const diffHost = { ...base, host: 'box2' }
+
+  assert.equal(sshAttachDialIdentity(base), 'alice@box1:22|app-a')
+  assert.notEqual(sshAttachDialIdentity(base), sshAttachDialIdentity(diffApp))
+  assert.notEqual(sshAttachDialIdentity(base), sshAttachDialIdentity(diffHost))
+})
+
+test('connectionDialFieldsChanged detects flyApp changes', () => {
+  const before: RegistryConnection = {
+    host: 'box',
+    id: 'box',
+    kind: 'ssh-attach',
+    label: 'Box',
+    port: 22,
+    flyApp: 'app-a'
+  }
+
+  assert.equal(connectionDialFieldsChanged(before, { ...before, flyApp: 'app-b' }), true)
+  assert.equal(connectionDialFieldsChanged(before, { ...before, flyApp: undefined }), true)
+  assert.equal(connectionDialFieldsChanged({ ...before, flyApp: undefined }, before), true)
+  assert.equal(connectionDialFieldsChanged(before, { ...before }), false)
 })

@@ -1359,6 +1359,9 @@ export interface Translations {
       sshHermesPathTitle: string
       sshHermesPathDesc: string
       sshHermesPathPlaceholder: string
+      sshFlyAppTitle: string
+      sshFlyAppDesc: string
+      sshFlyAppPlaceholder: string
       sshTestConnection: string
       sshConnect: string
       sshButtonsHint: string

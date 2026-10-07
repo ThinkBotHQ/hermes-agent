@@ -1941,6 +1941,10 @@ export const deOverrides = {
       sshHermesPathTitle: 'Hermes-Pfad (optional)',
       sshHermesPathDesc: 'Vollständiger Pfad zum Remote-Hermes-Binary. Leer = automatisch erkennen.',
       sshHermesPathPlaceholder: 'automatisch erkennen',
+      sshFlyAppTitle: 'Fly-App (optional)',
+      sshFlyAppDesc:
+        'Fly.io-App-Name. Wenn festgelegt, startet Hermes die Maschine und öffnet einen eigenen privaten Tunnel mit der Fly CLI; kein VPN oder Terminal erforderlich.',
+      sshFlyAppPlaceholder: 'my-fly-app',
       sshTestConnection: 'SSH testen',
       sshConnect: 'Verbinden',
       sshButtonsHint: 'Speichern wird beim nächsten Start angewendet. Verbinden verbindet sofort neu.',

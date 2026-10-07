@@ -144,6 +144,18 @@ function validateKeyPath(keyPath) {
   }
 }
 
+const _HOST_KEY_ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
+function validateHostKeyAlias(alias: unknown): void {
+  if (alias === undefined || alias === null) {
+    return
+  }
+
+  if (typeof alias !== 'string' || !_HOST_KEY_ALIAS_RE.test(alias)) {
+    throw new Error('Unsafe SSH host key alias')
+  }
+}
+
 // Token / secret redaction
 
 const _REDACTIONS: Array<[RegExp, string]> = [
@@ -190,6 +202,10 @@ function controlSocketPath(user, host, port, baseDir?, identity: any = {}) {
     identity.effectiveConfigFingerprint || ''
   ]
 
+  if (identity.hostKeyAlias) {
+    parts.push(identity.hostKeyAlias)
+  }
+
   const id = crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 16)
 
   return path.join(dir, `${id}.sock`)
@@ -233,7 +249,11 @@ function checkShortControlParent(): void {
 // Mux (POSIX): ControlMaster options so exec/forward share one authenticated
 // connection. No-mux (Windows OpenSSH never implemented mux sockets): plain
 // per-invocation options — each ssh call authenticates on its own.
-function baseSshOptions(controlPath, connectTimeoutMs?) {
+function baseSshOptions(controlPath, connectTimeoutMs?, hostKeyAlias?: string) {
+  if (hostKeyAlias !== undefined && hostKeyAlias !== null) {
+    validateHostKeyAlias(hostKeyAlias)
+  }
+
   const connectSecs = Math.max(1, Math.round((connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS) / 1000))
 
   const mux = controlPath
@@ -247,8 +267,11 @@ function baseSshOptions(controlPath, connectTimeoutMs?) {
       ]
     : []
 
+  const aliasOpts = hostKeyAlias ? ['-o', `HostKeyAlias=${hostKeyAlias}`] : []
+
   return [
     ...mux,
+    ...aliasOpts,
     '-o',
     'BatchMode=yes',
     '-o',
@@ -282,7 +305,7 @@ function target(user, host) {
 
 function buildExecArgs(conn, remoteCommand, connectTimeoutMs?) {
   return [
-    ...baseSshOptions(conn.controlPath, connectTimeoutMs),
+    ...baseSshOptions(conn.controlPath, connectTimeoutMs, conn.hostKeyAlias),
     ...hostArgs(conn),
     '--',
     target(conn.user, conn.host),
@@ -295,7 +318,7 @@ function buildControlArgs(conn, op, extra: string[] = [], connectTimeoutMs?) {
     '-O',
     op,
     ...extra,
-    ...baseSshOptions(conn.controlPath, connectTimeoutMs),
+    ...baseSshOptions(conn.controlPath, connectTimeoutMs, conn.hostKeyAlias),
     ...hostArgs(conn),
     '--',
     target(conn.user, conn.host)
@@ -310,7 +333,7 @@ function buildMasterArgs(conn, connectTimeoutMs?) {
     '-M',
     '-N',
     '-f',
-    ...baseSshOptions(conn.controlPath, connectTimeoutMs),
+    ...baseSshOptions(conn.controlPath, connectTimeoutMs, conn.hostKeyAlias),
     ...hostArgs(conn),
     '--',
     target(conn.user, conn.host)
@@ -326,7 +349,7 @@ function buildMasterArgs(conn, connectTimeoutMs?) {
 function buildInteractiveSshArgs(conn, remoteCwd, connectTimeoutMs?, remoteCommand?) {
   const args = [
     '-tt',
-    ...baseSshOptions(conn.controlPath, connectTimeoutMs),
+    ...baseSshOptions(conn.controlPath, connectTimeoutMs, conn.hostKeyAlias),
     ...hostArgs(conn),
     '--',
     target(conn.user, conn.host)
@@ -639,6 +662,7 @@ class SshConnection {
   user: string
   port: number
   keyPath: string
+  hostKeyAlias?: string
   controlPath: string
   _spawnFn: any
   _log: (msg: string) => void
@@ -663,6 +687,11 @@ class SshConnection {
       validateKeyPath(cfg.keyPath)
     }
 
+    if (cfg.hostKeyAlias !== undefined && cfg.hostKeyAlias !== null) {
+      validateHostKeyAlias(cfg.hostKeyAlias)
+      this.hostKeyAlias = cfg.hostKeyAlias
+    }
+
     this.host = cfg.host
     this.user = cfg.user || ''
     this.port = port
@@ -677,7 +706,8 @@ class SshConnection {
           keyPath: this.keyPath,
           ownershipId: opts.ownershipId,
           scope: opts.scope,
-          effectiveConfigFingerprint: opts.effectiveConfigFingerprint
+          effectiveConfigFingerprint: opts.effectiveConfigFingerprint,
+          hostKeyAlias: this.hostKeyAlias
         })
       : ''
     this._tunnels = new Map()
@@ -1058,7 +1088,7 @@ class SshConnection {
 
     if (!this._mux) {
       const args = [
-        ...baseSshOptions('', this._connectTimeoutMs),
+        ...baseSshOptions('', this._connectTimeoutMs, this.hostKeyAlias),
         ...hostArgs(this),
         '-v',
         '-N',
@@ -1246,6 +1276,7 @@ export {
   sshErrorMessage,
   stopTunnelChild,
   target,
+  validateHostKeyAlias,
   validateKeyPath,
   validateSshTarget,
   withRemoteTimeout

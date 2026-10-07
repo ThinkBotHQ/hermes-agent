@@ -1236,6 +1236,7 @@ export interface DesktopRegistryConnection {
   keyPath?: string
   remoteHermesPath?: string
   remoteProfile?: string
+  flyApp?: string
   tokenSet: boolean
   tokenPreview: null | string
   // Names of the stored extra gateway headers (Cloudflare Access etc.);
@@ -1287,6 +1288,7 @@ export interface DesktopRegistryConnectionInput {
   keyPath?: string
   remoteHermesPath?: string
   remoteProfile?: string
+  flyApp?: string
 }
 
 // One agent in the union roster: a profile on a registered source, with the

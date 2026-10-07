@@ -1613,6 +1613,10 @@ export const en: Translations = {
       sshHermesPathTitle: 'Hermes path (optional)',
       sshHermesPathDesc: 'Full path to the remote hermes binary. Blank = auto-detect.',
       sshHermesPathPlaceholder: 'auto-detect',
+      sshFlyAppTitle: 'Fly app (optional)',
+      sshFlyAppDesc:
+        'Fly.io app name. When set, Hermes starts the machine and opens its own private tunnel with the Fly CLI; no VPN or terminal needed.',
+      sshFlyAppPlaceholder: 'my-fly-app',
       sshTestConnection: 'Test SSH',
       sshConnect: 'Connect',
       sshButtonsHint: 'Save applies on the next launch. Connect reconnects now.',

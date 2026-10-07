@@ -1932,6 +1932,10 @@ export const esOverrides = {
       sshHermesPathTitle: 'Ruta de Hermes (opcional)',
       sshHermesPathDesc: 'Ruta completa al binario remoto de Hermes. En blanco = detección automática.',
       sshHermesPathPlaceholder: 'detección automática',
+      sshFlyAppTitle: 'App de Fly (opcional)',
+      sshFlyAppDesc:
+        'Nombre de la app de Fly.io. Cuando se establece, Hermes inicia la máquina y abre su propio túnel privado con la Fly CLI; no se necesita VPN ni terminal.',
+      sshFlyAppPlaceholder: 'my-fly-app',
       sshTestConnection: 'Probar SSH',
       sshConnect: 'Conectar',
       sshButtonsHint: 'Guardar se aplica en el próximo inicio. Conectar vuelve a conectar ahora.',

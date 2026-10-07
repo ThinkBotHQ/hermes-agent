@@ -1321,3 +1321,63 @@ test('withRemoteTimeout kills a hung probe remotely instead of orphaning it (#11
     assert.equal(grandStrays.trim(), '', 'watchdog killed the launcher’s grandchild too')
   }
 })
+
+test('argv unchanged without alias; hostKeyAlias adds -o HostKeyAlias=<alias> across all builders', () => {
+  const conn = { user: 'me', host: 'box', port: 22, keyPath: '', controlPath: '/tmp/x.sock' }
+
+  // argv unchanged without alias (deepEqual against current output)
+  assert.deepEqual(buildExecArgs(conn, 'uname -s', 15000), [
+    '-o',
+    'ControlPath=/tmp/x.sock',
+    '-o',
+    'ControlMaster=auto',
+    '-o',
+    'ControlPersist=300',
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'StrictHostKeyChecking=accept-new',
+    '-o',
+    'ExitOnForwardFailure=yes',
+    '-o',
+    'ConnectTimeout=15',
+    '--',
+    'me@box',
+    'uname -s'
+  ])
+
+  // with alias: -o HostKeyAlias=fly-proxy.tb-worker-host present in exec/control/master/interactive args
+  const alias = 'fly-proxy.tb-worker-host'
+  const connWithAlias = { ...conn, hostKeyAlias: alias }
+
+  const execArgs = buildExecArgs(connWithAlias, 'uname -s', 15000)
+  assert.ok(execArgs.includes('-o'))
+  assert.ok(execArgs.includes(`HostKeyAlias=${alias}`))
+
+  const controlArgs = buildControlArgs(connWithAlias, 'check', [], 15000)
+  assert.ok(controlArgs.includes(`HostKeyAlias=${alias}`))
+
+  const masterArgs = buildMasterArgs(connWithAlias, 15000)
+  assert.ok(masterArgs.includes(`HostKeyAlias=${alias}`))
+
+  const interactiveArgs = buildInteractiveSshArgs(connWithAlias, '', 15000)
+  assert.ok(interactiveArgs.includes(`HostKeyAlias=${alias}`))
+
+  // bad alias rejected
+  for (const bad of ['-bad', 'has space', 'a;b', '']) {
+    assert.throws(() => baseSshOptions('/tmp/x.sock', 15000, bad), /Unsafe SSH host key alias/)
+    assert.throws(() => new SshConnection({ host: 'box', hostKeyAlias: bad }), /Unsafe SSH host key alias/)
+  }
+})
+
+test('controlSocketPath includes hostKeyAlias in hash when set', () => {
+  const p1 = controlSocketPath('', '127.0.0.1', 2222, '/tmp/d', { hostKeyAlias: 'alias1' })
+  const p2 = controlSocketPath('', '127.0.0.1', 3333, '/tmp/d', { hostKeyAlias: 'alias2' })
+  assert.notEqual(p1, p2)
+
+  const pSamePortDiffAlias = controlSocketPath('', '127.0.0.1', 2222, '/tmp/d', { hostKeyAlias: 'alias2' })
+  assert.notEqual(p1, pSamePortDiffAlias)
+
+  const pNoAlias = controlSocketPath('', '127.0.0.1', 2222, '/tmp/d')
+  assert.notEqual(p1, pNoAlias)
+})

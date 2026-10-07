@@ -541,4 +541,19 @@ describe('dedupe helpers', () => {
     expect(sameBackendPeerLabel(mini, connections)).toBeNull()
     expect(sameBackendPeerLabel(legacy, connections)).toBeNull()
   })
+
+  it('renders Fly app row for ssh-attach and not for ssh', async () => {
+    render(<ConnectionsRegistrySection />)
+
+    await waitFor(() => expect(screen.getByText('Homelab')).toBeTruthy())
+    fireEvent.click(screen.getByText('Add connection'))
+
+    // When ssh is selected, Fly app row is NOT rendered
+    fireEvent.click(screen.getByRole('button', { name: 'SSH' }))
+    expect(screen.queryByPlaceholderText('my-fly-app')).toBeNull()
+
+    // When ssh-attach is selected, Fly app row IS rendered
+    fireEvent.click(screen.getByRole('button', { name: 'SSH (attach to host backend)' }))
+    expect(screen.getByPlaceholderText('my-fly-app')).toBeTruthy()
+  })
 })

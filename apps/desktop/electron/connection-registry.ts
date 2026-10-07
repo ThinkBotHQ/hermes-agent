@@ -73,7 +73,10 @@ export interface RegistryConnection {
   keyPath?: string
   remoteHermesPath?: string
   remoteProfile?: string
+  flyApp?: string
 }
+
+const FLY_APP_RE = /^[a-z0-9][a-z0-9-]{0,62}$/
 
 /**
  * A registry entry that failed normalization (#94246). The raw entry is USER
@@ -226,6 +229,7 @@ export interface RegistryLocalRoute {
 
 export interface ResolvedConnectionSshDescriptor {
   effectiveConfigFingerprint?: string
+  flyApp?: string
   host?: string
   keyPath?: string
   port?: number
@@ -435,6 +439,7 @@ export async function reuseMatchingPrimarySshBackend({
     !activeSsh ||
     sourceFingerprint !== String(activeSsh.effectiveConfigFingerprint || '').trim() ||
     String(source.remoteHermesPath || '').trim() !== String(activeSsh.remoteHermesPath || '').trim() ||
+    String(source.flyApp || '').trim() !== String(activeSsh.flyApp || '').trim() ||
     rootProfile(source.remoteProfile) !== rootProfile(activeSsh.remoteProfile)
   ) {
     return null
@@ -920,6 +925,7 @@ export interface ConnectionInput {
   keyPath?: string
   remoteHermesPath?: string
   remoteProfile?: string
+  flyApp?: string
 }
 
 /**
@@ -1012,6 +1018,20 @@ export function normalizeConnectionInput(input: ConnectionInput, registry: Conne
     }
 
     const entry: RegistryConnection = { id, kind, label, ...sshFields }
+
+    if (kind === 'ssh-attach') {
+      const flyApp = typeof input.flyApp === 'string' ? input.flyApp.trim() : ''
+
+      if (flyApp) {
+        if (!FLY_APP_RE.test(flyApp)) {
+          throw new Error(
+            `Invalid Fly app name: "${flyApp}". Fly app names must start with a lowercase letter or number, contain only lowercase letters, numbers, and hyphens, and be at most 63 characters long.`
+          )
+        }
+
+        entry.flyApp = flyApp
+      }
+    }
 
     // Carry the adopted session-token envelope across edits (mirrors the remote
     // branch): dropping it made a label rename wipe the backend's reuse
@@ -1119,6 +1139,7 @@ export function mergeConnectionInput(input: ConnectionInput, existing?: null | R
   inherit('keyPath')
   inherit('remoteHermesPath')
   inherit('remoteProfile')
+  inherit('flyApp')
   // Headers inherit like other dial fields: an edit payload that omits the
   // field keeps the stored set; an explicit payload (even {}) is
   // authoritative so the editor can clear them.
@@ -1160,7 +1181,8 @@ export function connectionDialFieldsChanged(before: RegistryConnection, after: R
     'port',
     'keyPath',
     'remoteHermesPath',
-    'remoteProfile'
+    'remoteProfile',
+    'flyApp'
   ]
 
   for (const field of fields) {
@@ -1179,6 +1201,23 @@ export function connectionDialFieldsChanged(before: RegistryConnection, after: R
   // Headers are dial material too: a changed access-proxy credential means
   // every open socket/backend authenticated with the OLD set.
   return JSON.stringify(before.headers ?? null) !== JSON.stringify(after.headers ?? null)
+}
+
+/**
+ * Canonical dial identity for an ssh-attach connection.
+ */
+export function sshAttachDialIdentity(connection: {
+  flyApp?: string
+  host?: string
+  port?: number
+  user?: string
+}): string {
+  const user = connection.user || ''
+  const host = connection.host || ''
+  const port = connection.port || 22
+  const flyApp = connection.flyApp || ''
+
+  return `${user}@${host}:${port}|${flyApp}`
 }
 
 // ── Registry-level operations (all pure: return a new registry) ────────────
@@ -1328,6 +1367,18 @@ export function normalizeRegistry(raw: unknown): ConnectionRegistry {
 
         const { mode: _mode, ...sshFields } = ssh
         Object.assign(clean, sshFields)
+
+        if (kind === 'ssh-attach') {
+          const flyApp = typeof entry.flyApp === 'string' ? entry.flyApp.trim() : ''
+
+          if (flyApp) {
+            if (!FLY_APP_RE.test(flyApp)) {
+              throw new Error(`Invalid Fly app name: "${flyApp}"`)
+            }
+
+            clean.flyApp = flyApp
+          }
+        }
 
         // normalizeSshConfig describes only the dial, so the token
         // persistSshConnectionToken() adopted must be carried explicitly (as the

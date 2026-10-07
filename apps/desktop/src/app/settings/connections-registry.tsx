@@ -42,6 +42,7 @@ interface EditorState {
   host: string
   keyPath: string
   remoteHermesPath: string
+  flyApp: string
   // ssh remote profile, hydrated on edit so the duplicate key matches the
   // main-process one (user@host:port + profile); the editor doesn't expose it.
   remoteProfile: string
@@ -66,6 +67,7 @@ function editorFromConnection(conn: DesktopRegistryConnection): EditorState {
     host: conn.host ? `${conn.user ? `${conn.user}@` : ''}${conn.host}${conn.port ? `:${conn.port}` : ''}` : '',
     keyPath: conn.keyPath || '',
     remoteHermesPath: conn.remoteHermesPath || '',
+    flyApp: conn.flyApp || '',
     remoteProfile: conn.remoteProfile || '',
     headers: (conn.headerNames || []).map(name => ({ name, stored: true, value: '' }))
   }
@@ -79,6 +81,7 @@ function emptyEditor(kind: DesktopConnectionKind): EditorState {
     host: '',
     keyPath: '',
     remoteHermesPath: '',
+    flyApp: '',
     remoteProfile: '',
     headers: []
   }
@@ -352,6 +355,14 @@ export function ConnectionsRegistrySection() {
           payload.host = editor.host
           payload.keyPath = editor.keyPath || undefined
           payload.remoteHermesPath = editor.remoteHermesPath.trim()
+
+          if (editor.kind === 'ssh-attach') {
+            const trimmedFlyApp = editor.flyApp.trim()
+
+            if (trimmedFlyApp) {
+              payload.flyApp = trimmedFlyApp
+            }
+          }
         }
 
         const result = await bridge.save(payload)
@@ -825,6 +836,19 @@ export function ConnectionsRegistrySection() {
                 }
                 title={s.sshHostTitle}
               />
+              {editor.kind === 'ssh-attach' && (
+                <ListRow
+                  action={
+                    <Input
+                      onChange={e => setEditor({ ...editor, flyApp: e.target.value })}
+                      placeholder={t.settings.gateway.sshFlyAppPlaceholder}
+                      value={editor.flyApp}
+                    />
+                  }
+                  description={t.settings.gateway.sshFlyAppDesc}
+                  title={t.settings.gateway.sshFlyAppTitle}
+                />
+              )}
               <ListRow
                 action={
                   <Input
