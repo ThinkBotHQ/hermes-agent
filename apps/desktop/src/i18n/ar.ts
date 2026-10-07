@@ -3199,6 +3199,7 @@ export const ar = defineLocale({
         streaming: 'خطأ في اتصال البث'
       },
       errorRetry: 'إعادة المحاولة',
+      errorResume: 'استئناف',
       errorLimitResets: time => `يُعاد ضبط الحد عند ${time}`,
       errorRetryAtReset: time => `إعادة المحاولة عند إعادة ضبط الحد (${time})`,
       errorRetryScheduled: (time, wait) => `ستتم إعادة المحاولة عند ${time} — بعد ${wait}`,

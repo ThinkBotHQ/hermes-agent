@@ -3691,7 +3691,7 @@ export const ja = defineLocale({
           'AI サービスがリクエストを完了できませんでした。少し待って再試行するか、プロバイダーを切り替えてください。',
         endpoint:
           'カスタムモデルサーバーに接続できません。サーバーが起動しているか確認し、メッセージを再送してください。',
-        streaming: '返信が完了する前に接続が切れました。再試行してもう一度送信してください。'
+        streaming: '返信が完了する前に接続が切れました。再開して続行してください。'
       },
       errorCodes: {
         provider_policy_blocked: {
@@ -3756,6 +3756,7 @@ export const ja = defineLocale({
         streaming: 'ストリーミング接続のエラー'
       },
       errorRetry: '再試行',
+      errorResume: '再開',
       errorLimitResets: time => `制限は ${time} にリセットされます`,
       errorRetryAtReset: time => `制限のリセット時に再試行（${time}）`,
       errorRetryScheduled: (time, wait) => `${time} に再試行 — 残り ${wait}`,

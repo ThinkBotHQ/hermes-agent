@@ -13,6 +13,7 @@ import {
   LIVE_TURN_EVENT_SILENCE_MS,
   noteSessionEvent,
   publishSessionState,
+  reconcileBusyStatesOnReconnect,
   SESSION_WATCHDOG_TIMEOUT_MS
 } from './session-states'
 
@@ -283,5 +284,93 @@ describe('live turn event silence', () => {
 
     expect($sessionStates.get()['rt-done']?.messages.some(message => message.errorSurface)).toBe(false)
     expect($workingSessionIds.get()).not.toContain('s-done')
+  })
+
+  it('does not set a cut-off error when a turn with a completed reply experiences a connection drop', () => {
+    $activeSessionId.set('rt-complete')
+
+    const completedTurn: ClientSessionState = state({
+      awaitingResponse: false,
+      busy: true,
+      messages: [
+        {
+          id: 'u1',
+          parts: [{ type: 'text', text: 'help me' }],
+          role: 'user'
+        },
+        {
+          completedAt: Date.now() / 1000,
+          durableComplete: true,
+          id: 'a1',
+          parts: [{ type: 'text', text: 'Here is the complete solution.' }],
+          pending: false,
+          role: 'assistant'
+        }
+      ],
+      model: 'glm-5.3-flash',
+      sawAssistantPayload: true,
+      storedSessionId: 's-complete',
+      streamId: null,
+      turnLive: true,
+      turnStartedAt: Date.now()
+    })
+
+    publishSessionState('rt-complete', completedTurn)
+    noteSessionEvent('rt-complete')
+
+    // Connection drops and reconnects, or silence timer expires
+    reconcileBusyStatesOnReconnect()
+    vi.advanceTimersByTime(SILENCE_MS)
+
+    const settled = $sessionStates.get()['rt-complete']
+    expect(settled?.messages.some(message => message.errorSurface)).toBe(false)
+    expect(settled?.messages.some(message => message.id.startsWith('assistant-interrupted'))).toBe(false)
+    expect(settled?.messages).toHaveLength(2)
+  })
+
+  it('sets a visible interrupted state with continue recovery when connection drops mid-stream with no terminal event', () => {
+    $activeSessionId.set('rt-midstream')
+
+    const midstreamTurn: ClientSessionState = state({
+      awaitingResponse: true,
+      busy: true,
+      messages: [
+        {
+          id: 'u1',
+          parts: [{ type: 'text', text: 'help me' }],
+          role: 'user'
+        },
+        {
+          id: 'a1',
+          parts: [{ type: 'text', text: 'Halfway through...' }],
+          pending: true,
+          role: 'assistant'
+        }
+      ],
+      model: 'glm-5.3-flash',
+      sawAssistantPayload: true,
+      storedSessionId: 's-midstream',
+      streamId: 'a1',
+      turnLive: true,
+      turnStartedAt: Date.now()
+    })
+
+    publishSessionState('rt-midstream', midstreamTurn)
+    noteSessionEvent('rt-midstream')
+
+    // Connection drops mid-stream with nothing persisted
+    reconcileBusyStatesOnReconnect()
+    vi.advanceTimersByTime(SILENCE_MS)
+
+    const settled = $sessionStates.get()['rt-midstream']
+    const failed = settled?.messages.find(message => message.errorSurface)
+    expect(failed).toBeDefined()
+    expect(failed?.errorSurface?.layer).toBe('streaming')
+    expect(failed?.errorSurface?.code).toBe('stream_drop')
+    // Action is not a prompt re-send: errorRecoveryPlan provides continue/retry,
+    // which maps to ContinueRetryAction / session.continue in the UI
+    const plan = errorRecoveryPlan(failed?.errorSurface)
+    expect(plan.retry).toBe(true)
+    expect(failed?.error).toBe('The connection dropped before the reply finished.')
   })
 })

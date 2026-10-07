@@ -5208,7 +5208,7 @@ export const en: Translations = {
         provider: 'The AI service could not complete this request. Retry in a moment or switch provider.',
         runtime:
           'Hermes hit an internal problem starting this reply. Send your message again; if it keeps happening, send diagnostics.',
-        streaming: 'The connection dropped before the reply finished. Retry to send it again.'
+        streaming: 'The connection dropped before the reply finished. Resume to continue.'
       },
       errorCodes: {
         auth: {
@@ -5247,7 +5247,7 @@ export const en: Translations = {
         },
         stream_drop: {
           title: 'The reply was cut off',
-          body: 'The connection dropped before the reply finished. Retry to send it again.'
+          body: 'The connection dropped before the reply finished. Resume to continue.'
         },
         upstream_blocked: {
           title: 'A firewall blocked the request',
@@ -5354,6 +5354,7 @@ export const en: Translations = {
       errorGenericProvider: 'The AI service',
       errorToastTitle: "Hermes couldn't finish the reply",
       errorRetry: 'Retry',
+      errorResume: 'Resume',
       errorLimitResets: time => `Limit resets at ${time}`,
       errorRetryAtReset: time => `Retry when the limit resets (${time})`,
       errorRetryScheduled: (time, wait) => `Retrying at ${time} — in ${wait}`,

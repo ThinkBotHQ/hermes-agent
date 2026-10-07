@@ -5437,7 +5437,7 @@ export const frOverrides = {
           "Le service d'IA n'a pas pu traiter cette demande. Réessayez dans un instant ou changez de fournisseur.",
         runtime:
           'Hermes a rencontré un problème interne au démarrage de cette réponse. Renvoyez votre message ; si cela persiste, envoyez les diagnostics.',
-        streaming: 'La connexion a été interrompue avant la fin de la réponse. Réessayez pour la renvoyer.'
+        streaming: 'La connexion a été interrompue avant la fin de la réponse. Reprenez pour continuer.'
       },
       errorCodes: {
         auth: {
@@ -5479,7 +5479,7 @@ export const frOverrides = {
         },
         stream_drop: {
           title: 'La réponse a été interrompue',
-          body: 'La connexion a été coupée avant la fin de la réponse. Réessayez pour la renvoyer.'
+          body: 'La connexion a été interrompue avant la fin de la réponse. Reprenez pour continuer.'
         },
         upstream_blocked: {
           title: 'Un pare-feu a bloqué la requête',
@@ -5585,6 +5585,7 @@ export const frOverrides = {
       errorGenericProvider: "Le service d'IA",
       errorToastTitle: "Hermes n'a pas pu terminer la réponse",
       errorRetry: 'Réessayer',
+      errorResume: 'Reprendre',
       errorLimitResets: (time: string) => `Le quota se réinitialise à ${time}`,
       errorRetryAtReset: (time: string) => `Réessayer à la réinitialisation du quota (${time})`,
       errorRetryScheduled: (time: string, wait: string) => `Nouvel essai à ${time} — dans ${wait}`,

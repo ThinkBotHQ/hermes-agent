@@ -3877,7 +3877,7 @@ export const zhHant = defineLocale({
         generic: 'Hermes 回覆時發生問題。請重試；若問題持續，請複製錯誤詳細資訊。',
         provider: 'AI 服務無法完成此請求。請稍後重試或切換服務商。',
         endpoint: 'Hermes 無法連線至你的自訂模型伺服器。請確認它正在執行，然後重新傳送訊息。',
-        streaming: '回覆完成前連線已中斷。請重試以重新傳送。'
+        streaming: '回覆完成前連線已中斷。繼續以完成回覆。'
       },
       errorCodes: {
         provider_policy_blocked: {
@@ -3937,6 +3937,7 @@ export const zhHant = defineLocale({
         streaming: '串流連線錯誤'
       },
       errorRetry: '重試',
+      errorResume: '繼續',
       errorLimitResets: time => `限額將於 ${time} 重設`,
       errorRetryAtReset: time => `限額重設後重試（${time}）`,
       errorRetryScheduled: (time, wait) => `將於 ${time} 重試 — 還剩 ${wait}`,

@@ -22,7 +22,6 @@ import { atom, computed } from 'nanostores'
 import { routeSessionId } from '@/app/routes'
 import type { ClientSessionState } from '@/app/types'
 import { findGroupOfPane, type LayoutNode } from '@/components/pane-shell/tree/model'
-import { pruneFinishedSessionSubagents } from '@/store/subagents'
 import {
   $layoutTree,
   focusedSessionTabAnchor,
@@ -37,6 +36,7 @@ import type { ChatMessage } from '@/lib/chat-messages'
 import type { ErrorSurface } from '@/lib/error-surface'
 import { stableArray } from '@/lib/stable-array'
 import { readJson, writeJson } from '@/lib/storage'
+import { pruneFinishedSessionSubagents } from '@/store/subagents'
 import type { SessionInfo } from '@/types/hermes'
 
 import { dropStatusDrawersForProfile, migrateStatusDrawersForProfile } from './composer-status-drawer'
@@ -379,15 +379,70 @@ function clearEventSilence(runtimeId: string) {
   }
 }
 
+function hasCompletedAssistantReply(messages: ChatMessage[] | undefined): boolean {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return false
+  }
+
+  const lastUserIndex = messages.findLastIndex(
+    message => message?.role === 'user' && !message?.id?.startsWith('user-queued-')
+  )
+
+  const turnMessages = lastUserIndex >= 0 ? messages.slice(lastUserIndex + 1) : messages
+  const lastAssistant = turnMessages.findLast(message => message?.role === 'assistant')
+
+  if (!lastAssistant) {
+    return false
+  }
+
+  if (lastAssistant.durableComplete === true || lastAssistant.persistedTurn?.complete === true) {
+    return true
+  }
+
+  if (lastAssistant.error || lastAssistant.errorSurface) {
+    return false
+  }
+
+  const hasText =
+    Array.isArray(lastAssistant.parts) &&
+    lastAssistant.parts.some(
+      part => part?.type === 'text' && typeof part.text === 'string' && part.text.trim().length > 0
+    )
+
+  const hasOpenTools =
+    Array.isArray(lastAssistant.parts) &&
+    lastAssistant.parts.some(
+      part => part?.type === 'tool-call' && part.completedAt === undefined && part.result === undefined
+    )
+
+  return !lastAssistant.interim && !lastAssistant.pending && hasText && !hasOpenTools
+}
+
 function isLiveTurnAwaitingEvents(state: ClientSessionState | undefined): boolean {
-  return Boolean(state && (state.busy || state.awaitingResponse || state.turnLive) && !state.needsInput)
+  if (!state || state.needsInput) {
+    return false
+  }
+
+  if (hasCompletedAssistantReply(state.messages)) {
+    return false
+  }
+
+  return Boolean(state.busy || state.awaitingResponse || state.turnLive)
 }
 
 const SILENT_TURN_RETRY: ErrorSurface = { code: 'stream_drop', layer: 'streaming', retryable: true }
 
 function withSilentTurnRetry(messages: ChatMessage[], streamId: string | null): ChatMessage[] {
   const occurredAt = Date.now() / 1000
+
+  if (hasCompletedAssistantReply(messages)) {
+    return messages
+      .filter(message => !(message.pending && message.parts.length === 0))
+      .map(message => (message.pending ? { ...message, completedAt: occurredAt, pending: false } : message))
+  }
+
   const error = 'The connection dropped before the reply finished.'
+
   const targetId =
     (streamId && messages.some(message => message.id === streamId) ? streamId : null) ??
     [...messages].reverse().find(message => message.role === 'assistant' && message.pending)?.id ??
@@ -871,6 +926,7 @@ export function clearAllSessionStates() {
   }
 
   sessionWatchdogTimers.clear()
+
   for (const timer of sessionEventSilenceTimers.values()) {
     clearTimeout(timer)
   }
@@ -1012,7 +1068,18 @@ export function reconcileBusyStatesOnReconnect(scope?: string) {
       const published = $sessionStates.get()[runtimeId]
 
       if (published?.busy || published?.awaitingResponse) {
-        publishSessionState(runtimeId, { ...published, awaitingResponse: false, busy: false })
+        const replyCompleted = hasCompletedAssistantReply(published.messages)
+
+        publishSessionState(runtimeId, {
+          ...published,
+          awaitingResponse: false,
+          busy: false,
+          ...(replyCompleted ? { turnLive: false } : {})
+        })
+
+        if (replyCompleted) {
+          clearEventSilence(runtimeId)
+        }
       }
     }
   } finally {

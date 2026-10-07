@@ -5415,7 +5415,7 @@ export const esOverrides = {
           'El servicio de IA no pudo completar esta solicitud. Reinténtalo en un momento o cambia de proveedor.',
         runtime:
           'Hermes tuvo un problema interno al iniciar esta respuesta. Vuelve a enviar el mensaje; si sigue ocurriendo, envía un diagnóstico.',
-        streaming: 'La conexión se cortó antes de que terminara la respuesta. Reinténtalo para enviarla de nuevo.'
+        streaming: 'La conexión se cortó antes de que terminara la respuesta. Reanuda para continuar.'
       },
       errorCodes: {
         auth: {
@@ -5459,7 +5459,7 @@ export const esOverrides = {
         },
         stream_drop: {
           title: 'La respuesta se cortó',
-          body: 'La conexión se cortó antes de que terminara la respuesta. Reinténtalo para enviarla de nuevo.'
+          body: 'La conexión se cortó antes de que terminara la respuesta. Reanuda para continuar.'
         },
         upstream_blocked: {
           title: 'Un firewall bloqueó la solicitud',
@@ -5565,6 +5565,7 @@ export const esOverrides = {
       errorGenericProvider: 'El servicio de IA',
       errorToastTitle: 'Hermes no pudo terminar la respuesta',
       errorRetry: 'Reintentar',
+      errorResume: 'Reanudar',
       errorLimitResets: (time: string) => `El límite se restablece a las ${time}`,
       errorRetryAtReset: (time: string) => `Reintentar cuando se restablezca el límite (${time})`,
       errorRetryScheduled: (time: string, wait: string) => `Reintentando a las ${time}, dentro de ${wait}`,

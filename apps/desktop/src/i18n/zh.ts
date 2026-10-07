@@ -4666,7 +4666,7 @@ export const zh = defineLocale({
         generic: 'Hermes 回复时出现问题。请重试；若问题持续，请复制错误详情。',
         provider: 'AI 服务无法完成此请求。请稍后重试或切换服务商。',
         endpoint: 'Hermes 无法连接到你的自定义模型服务器。请确认它正在运行，然后重新发送消息。',
-        streaming: '回复完成前连接已断开。请重试以重新发送。'
+        streaming: '回复完成前连接已断开。继续以完成回复。'
       },
       errorCodes: {
         provider_policy_blocked: {
@@ -4726,6 +4726,7 @@ export const zh = defineLocale({
         streaming: '流式连接错误'
       },
       errorRetry: '重试',
+      errorResume: '继续',
       errorLimitResets: time => `限额将于 ${time} 重置`,
       errorRetryAtReset: time => `限额重置后重试（${time}）`,
       errorRetryScheduled: (time, wait) => `将于 ${time} 重试 — 还剩 ${wait}`,

@@ -978,7 +978,15 @@ const ErrorRecoveryActions: FC = () => {
           {copy.errorOpenHermesFolder}
         </button>
       )}
-      {plan.retry && <ContinueRetryAction label={copy.errorRetry} />}
+      {plan.retry && (
+        <ContinueRetryAction
+          label={
+            surface?.layer === 'streaming' || surface?.code === 'stream_drop'
+              ? copy.errorResume
+              : copy.errorRetry
+          }
+        />
+      )}
       {plan.retry && limitReset && (
         <span className="px-1 text-xs text-muted-foreground" data-testid="error-limit-reset">
           {copy.errorLimitResets(limitReset)}

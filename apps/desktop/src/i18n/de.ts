@@ -5422,7 +5422,7 @@ export const deOverrides = {
         runtime:
           'Beim Starten dieser Antwort ist in Hermes ein internes Problem aufgetreten. Senden Sie Ihre Nachricht erneut; wenn es bestehen bleibt, senden Sie Diagnosedaten.',
         streaming:
-          'Die Verbindung ist abgebrochen, bevor die Antwort fertig war. Versuchen Sie es erneut, um sie noch einmal zu senden.'
+          'Die Verbindung ist abgebrochen, bevor die Antwort fertig war. Fortsetzen, um fortzufahren.'
       },
       errorCodes: {
         auth: {
@@ -5467,7 +5467,7 @@ export const deOverrides = {
         },
         stream_drop: {
           title: 'Die Antwort wurde abgebrochen',
-          body: 'Die Verbindung ist abgebrochen, bevor die Antwort fertig war. Versuchen Sie es erneut, um sie noch einmal zu senden.'
+          body: 'Die Verbindung ist abgebrochen, bevor die Antwort fertig war. Fortsetzen, um fortzufahren.'
         },
         upstream_blocked: {
           title: 'Eine Firewall hat die Anfrage blockiert',
@@ -5575,6 +5575,7 @@ export const deOverrides = {
       errorGenericProvider: 'Der KI-Dienst',
       errorToastTitle: 'Hermes konnte die Antwort nicht fertigstellen',
       errorRetry: 'Erneut versuchen',
+      errorResume: 'Fortsetzen',
       errorLimitResets: (time: string) => `Limit wird um ${time} zurückgesetzt`,
       errorRetryAtReset: (time: string) => `Erneut versuchen, wenn das Limit zurückgesetzt wird (${time})`,
       errorRetryScheduled: (time: string, wait: string) => `Neuer Versuch um ${time} – in ${wait}`,
