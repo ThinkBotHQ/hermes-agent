@@ -228,20 +228,51 @@ export interface AttachWhenReadyOptions extends AttachOptions {
  */
 export async function attachWhenReady(ssh: AttachSshConnection, opts: AttachWhenReadyOptions = {}): Promise<AttachResult> {
   const { intervalMs = 2000, now = Date.now, sleep, waitMs = 45_000, ...attachOpts } = opts
-  const pause = sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)))
+  const signal = attachOpts.signal
+  const pause = sleep ?? ((ms: number) => abortableDelay(ms, signal))
   const deadline = now() + waitMs
+  let last: unknown = null
 
   for (;;) {
+    // A cancelled bootstrap must not start another read on the host.
+    if (signal?.aborted) {
+      throw last ?? new AttachNoBackendError('Attach was cancelled before the host backend came up')
+    }
+
     try {
       return await attach(ssh, attachOpts)
     } catch (error) {
-      if (!(error instanceof AttachNoBackendError) || attachOpts.signal?.aborted || now() + intervalMs > deadline) {
+      last = error
+
+      if (!(error instanceof AttachNoBackendError) || signal?.aborted || now() + intervalMs > deadline) {
         throw error
       }
 
       await pause(intervalMs)
     }
   }
+}
+
+// Resolves after `ms`, or at once when the signal aborts: a cancelled wait must
+// not hold its bootstrap (and whatever is queued behind it) for the full pause.
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal?.aborted) {
+      resolve()
+
+      return
+    }
+
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+
+    const timer = setTimeout(done, ms)
+
+    signal?.addEventListener('abort', done, { once: true })
+  })
 }
 
 /**

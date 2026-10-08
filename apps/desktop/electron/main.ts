@@ -10054,14 +10054,15 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
             { host: sshConfig.host, port: sshConfig.port || 22, user: sshConfig.user, flyApp: registryEntry.flyApp },
             {
               signal: lease.signal,
-              onStatus: () => {
-                hostStarting = true
-                updateBootProgress({ phase: 'backend.remote', message: 'Starting host…', running: true, error: null })
-              }
+              onStatus: () => updateBootProgress({
+                phase: 'backend.remote', message: 'Starting host…', running: true, error: null
+              })
             }
           )
         : { route: 'direct' as const, host: sshConfig.host, port: sshConfig.port, user: sshConfig.user }
 
+      // Only a machine THIS attempt started: an already-running host has no boot window to wait out.
+      hostStarting = 'hostStarted' in transport && transport.hostStarted === true
       route = transport.route
       flyProxy = transport.route === 'fly-proxy' ? transport.proxy : undefined
       const hostKeyAlias = transport.route === 'fly-proxy' ? transport.hostKeyAlias : undefined

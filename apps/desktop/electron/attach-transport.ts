@@ -27,9 +27,11 @@ export interface AttachTransportDeps {
 export type AttachProxyHandle = Pick<FlyProxyHandle, 'alive' | 'localPort' | 'onExit' | 'stop'>
 
 export type AttachTransport =
-  | { route: 'direct'; host: string; port: number; user?: string }
+  | { route: 'direct'; host: string; port: number; user?: string; /** this resolution started a stopped machine */ hostStarted?: boolean }
   | {
       route: 'fly-proxy'
+      /** this resolution started a stopped machine */
+      hostStarted?: boolean
       host: '127.0.0.1'
       port: number
       user?: string
@@ -86,7 +88,9 @@ export async function resolveAttachTransport(
 
   assertNotAborted(deps.signal)
   deps.onStatus?.('starting-host')
-  await (deps.ensureFlyMachineStarted || ensureFlyMachineStarted)(target.flyApp, { signal: deps.signal })
+  const ensured = await (deps.ensureFlyMachineStarted || ensureFlyMachineStarted)(target.flyApp, { signal: deps.signal })
+  // Only when the machine was actually stopped and this call started it (not for one already running).
+  const started = (ensured as null | undefined | { started?: boolean })?.started === true ? { hostStarted: true as const } : {}
 
   const deadline = Date.now() + (deps.directRetryMs ?? 3000)
 
@@ -96,7 +100,7 @@ export async function resolveAttachTransport(
     if (await probe(target.host, target.port, 1500)) {
       assertNotAborted(deps.signal)
 
-      return direct
+      return { ...direct, ...started }
     }
 
     if (Date.now() < deadline) {
@@ -112,7 +116,7 @@ export async function resolveAttachTransport(
 
     return {
       route: 'fly-proxy', host: '127.0.0.1', port: proxy.localPort, user: target.user,
-      hostKeyAlias: flyHostKeyAlias(target.flyApp), proxy
+      hostKeyAlias: flyHostKeyAlias(target.flyApp), proxy, ...started
     }
   } catch (error) {
     await proxy.stop()

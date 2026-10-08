@@ -30,6 +30,23 @@ describe('resolveAttachTransport', () => {
     assert.deepEqual(calls, [])
   })
 
+  test('reports hostStarted only when the machine was really started', async () => {
+    const run = (ensured: unknown) => {
+      let probes = 0
+
+      return resolveAttachTransport({ ...input, flyApp: 'app-a' }, {
+        directRetryMs: 0,
+        ensureFlyMachineStarted: async () => ensured,
+        probeTcp: async () => ++probes > 1,
+        startFlyProxy: async () => { throw new Error('unexpected') }
+      })
+    }
+
+    assert.equal((await run({ machineId: 'm1', started: true })).hostStarted, true)
+    assert.equal('hostStarted' in (await run({ machineId: 'm1', started: false })), false)
+    assert.equal('hostStarted' in (await run(undefined)), false)
+  })
+
   test('wakes host then uses direct route when retry succeeds', async () => {
     const calls: string[] = []
 

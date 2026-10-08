@@ -372,6 +372,29 @@ describe('attachWhenReady (host just started)', () => {
     assert.ok(clock <= 6000)
   })
 
+  test('a cancel during the pause ends the wait at once and starts no further read', async () => {
+    let reads = 0
+    const ssh = fakeSsh([[/host-serve\.json/, () => (++reads, '__HERMES_ATTACH_MISSING__')]])
+    const controller = new AbortController()
+    const started = Date.now()
+
+    setTimeout(() => controller.abort(), 30)
+
+    await assert.rejects(() => attachWhenReady(ssh, { intervalMs: 2000, signal: controller.signal }), AttachNoBackendError)
+    assert.equal(reads, 1)
+    assert.ok(Date.now() - started < 1000, 'the 2 s pause was not interrupted')
+  })
+
+  test('an already-cancelled attempt does not read the host at all', async () => {
+    let reads = 0
+    const ssh = fakeSsh([[/host-serve\.json/, () => (++reads, '__HERMES_ATTACH_MISSING__')]])
+    const controller = new AbortController()
+
+    controller.abort()
+    await assert.rejects(() => attachWhenReady(ssh, { signal: controller.signal }), AttachNoBackendError)
+    assert.equal(reads, 0)
+  })
+
   test('does not retry any other failure', async () => {
     const bad = `${JSON.stringify({ ...record, tokenFingerprint: 'deadbeefdeadbeef' })}\n__HERMES_ATTACH_DELIM__\n${token}`
     let reads = 0
