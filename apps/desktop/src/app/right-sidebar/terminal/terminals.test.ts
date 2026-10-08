@@ -203,6 +203,30 @@ describe('session cwd → terminal tab linking', () => {
     expect($terminals.get().find(t => t.id === termId)?.remoteLabel).toBe('hermes@tb-worker-host')
   })
 
+  it('a disposed shell takes its host label with it, before the next shell reports', async () => {
+    const { $terminals, clearTerminalRemoteLabel, createTerminal, formatTerminalTitle, reportTerminalShell } =
+      await loadTerminalStore()
+
+    const termId = createTerminal('/repo')
+
+    reportTerminalShell(termId, 'ssh', 'hermes@tb-worker-host')
+
+    // The remount-during-switch case: the old PTY is disposed and the tab entry is
+    // re-used; the replacement (local) shell has not reported yet.
+    clearTerminalRemoteLabel(termId)
+
+    const between = $terminals.get().find(t => t.id === termId)
+
+    expect(between?.remoteLabel).toBeUndefined()
+    expect(formatTerminalTitle(between?.title ?? '', between?.remoteLabel)).not.toContain('tb-worker-host')
+
+    const before = $terminals.get()
+
+    clearTerminalRemoteLabel(termId)
+    clearTerminalRemoteLabel('missing')
+    expect($terminals.get()).toBe(before)
+  })
+
   it('a local shell clears a remote label left on the same terminal, and the label is never stored', async () => {
     const { $terminals, createTerminal, formatTerminalTitle, reportTerminalShell } = await loadTerminalStore()
     const termId = createTerminal('/repo')

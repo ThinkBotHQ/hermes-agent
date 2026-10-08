@@ -6,7 +6,7 @@ import { Loader } from '@/components/ui/loader'
 import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
 
-import { reportTerminalShell } from './terminals'
+import { clearTerminalRemoteLabel, reportTerminalShell } from './terminals'
 import { useAgentTerminal } from './use-agent-terminal'
 import { useTerminalSession } from './use-terminal-session'
 
@@ -48,7 +48,8 @@ export function TerminalInstance({
     onAddSelectionToChat,
     restoreCwd,
     reviveBuffer,
-    onShell: (shell, remoteLabel) => reportTerminalShell(id, shell, remoteLabel)
+    onShell: (shell, remoteLabel) => reportTerminalShell(id, shell, remoteLabel),
+    onShellEnd: () => clearTerminalRemoteLabel(id)
   })
 
   return (

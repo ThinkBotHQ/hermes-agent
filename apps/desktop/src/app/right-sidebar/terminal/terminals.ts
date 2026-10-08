@@ -398,6 +398,28 @@ export function formatTerminalTitle(title: string, remoteLabel?: string): string
   return title
 }
 
+/** A terminal's shell ended (dispose, remount, restart): its host label described
+ *  that process, so it goes with it. The next shell reports its own. */
+export function clearTerminalRemoteLabel(id: string): void {
+  const terminals = $terminals.get()
+
+  if (!terminals.some(term => term.id === id && term.remoteLabel)) {
+    return
+  }
+
+  $terminals.set(
+    terminals.map(term => {
+      if (term.id !== id) {
+        return term
+      }
+
+      const { remoteLabel: _ended, ...rest } = term
+
+      return rest
+    })
+  )
+}
+
 /** A live terminal reports its resolved shell; adopt it as the label only while
  *  the user hasn't named the tab themselves. */
 export function reportTerminalShell(id: string, shell: string, remoteLabel?: string): void {

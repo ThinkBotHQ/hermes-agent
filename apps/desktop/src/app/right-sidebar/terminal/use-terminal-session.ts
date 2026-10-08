@@ -244,6 +244,8 @@ interface UseTerminalSessionOptions {
   reviveBuffer?: string
   /** Reports the resolved shell name once the PTY is live (for the tab label). */
   onShell?: (shell: string, remoteLabel?: string) => void
+  /** The PTY behind this tab is going away; anything describing it (host label) is stale. */
+  onShellEnd?: () => void
 }
 
 // Parse a working directory out of a cwd-reporting OSC payload. Covers OSC 7
@@ -386,7 +388,8 @@ export function useTerminalSession({
   onAddSelectionToChat,
   restoreCwd,
   reviveBuffer,
-  onShell
+  onShell,
+  onShellEnd
 }: UseTerminalSessionOptions) {
   // Key off renderedMode (the painted surface type), not resolvedMode (the
   // clicked switch) — a skin can keep a light surface in "dark" mode, and we
@@ -422,6 +425,7 @@ export function useTerminalSession({
   const selectionRef = useRef('')
   const onAddSelectionToChatRef = useRef(onAddSelectionToChat)
   const onShellRef = useRef(onShell)
+  const onShellEndRef = useRef(onShellEnd)
   // Re-fit on activation: a tab hidden via display:none has a 0×0 host, so its
   // last fit is stale by the time it's shown again.
   const fitRef = useRef<((visible: boolean) => void) | null>(null)
@@ -436,7 +440,8 @@ export function useTerminalSession({
   useEffect(() => {
     onAddSelectionToChatRef.current = onAddSelectionToChat
     onShellRef.current = onShell
-  }, [onAddSelectionToChat, onShell])
+    onShellEndRef.current = onShellEnd
+  }, [onAddSelectionToChat, onShell, onShellEnd])
 
   // Live selection at call time. A redraw-heavy TUI (spinners, clocks) outruns
   // onSelectionChange, so trust xterm directly — fall back to the native
@@ -963,6 +968,9 @@ export function useTerminalSession({
       if (id) {
         void terminalApi.dispose(id)
       }
+
+      // Before the next shell starts: a re-used tab must not show the old host.
+      onShellEndRef.current?.()
 
       term.dispose()
       termRef.current = null
