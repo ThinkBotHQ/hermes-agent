@@ -7,7 +7,9 @@ import {
   AttachIdentityError,
   AttachNoBackendError,
   attachScopesOwnedBy,
+  attachTimeoutHint,
   AttachTokenMismatchError,
+  attachWhenReady,
   detach,
   planReattach,
   reattach,
@@ -325,4 +327,66 @@ test('attachScopesOwnedBy finds the primary scope of a removed connection, not o
   assert.deepEqual(attachScopesOwnedBy(states, 'lab'), ['', 'conn:lab::work'])
   assert.deepEqual(attachScopesOwnedBy(states, ''), [])
   assert.deepEqual(attachScopesOwnedBy(states, 'missing'), [])
+})
+
+describe('attachWhenReady (host just started)', () => {
+  const { record, token } = makeHostRecord()
+  const servedOutput = `${JSON.stringify(record)}\n__HERMES_ATTACH_DELIM__\n${token}`
+
+  test('machine woke, ssh answers before serve is up: waits and then attaches, never erroring the first connect', async () => {
+    let reads = 0
+    const ssh = fakeSsh([[/host-serve\.json/, () => (++reads < 3 ? '__HERMES_ATTACH_MISSING__' : servedOutput)]])
+    const sleeps: number[] = []
+    const pid = record.pid
+
+    const result = await attachWhenReady(ssh, {
+      fetchFn: (async () => ({ json: async () => ({ pid }), ok: true, status: 200, statusText: 'OK' })) as any,
+      intervalMs: 2000,
+      pickLocalPort: () => 41000,
+      sleep: async ms => {
+        sleeps.push(ms)
+      }
+    })
+
+    assert.equal(result.attachOnly, true)
+    assert.equal(reads, 3)
+    assert.deepEqual(sleeps, [2000, 2000])
+  })
+
+  test('gives up with the no-backend error once the wait is spent', async () => {
+    const ssh = fakeSsh([[/host-serve\.json/, '__HERMES_ATTACH_MISSING__']])
+    let clock = 0
+
+    await assert.rejects(
+      () =>
+        attachWhenReady(ssh, {
+          intervalMs: 2000,
+          now: () => clock,
+          sleep: async ms => {
+            clock += ms
+          },
+          waitMs: 6000
+        }),
+      AttachNoBackendError
+    )
+    assert.ok(clock <= 6000)
+  })
+
+  test('does not retry any other failure', async () => {
+    const bad = `${JSON.stringify({ ...record, tokenFingerprint: 'deadbeefdeadbeef' })}\n__HERMES_ATTACH_DELIM__\n${token}`
+    let reads = 0
+    const ssh = fakeSsh([[/host-serve\.json/, () => (++reads, bad)]])
+
+    await assert.rejects(() => attachWhenReady(ssh, { sleep: async () => undefined }), AttachTokenMismatchError)
+    assert.equal(reads, 1)
+  })
+})
+
+test('attachTimeoutHint names the Fly app only for an attach timeout without one', () => {
+  const base = 'SSH operation to hermes@host timed out.'
+
+  assert.match(attachTimeoutHint(base, { isAttach: true, kind: 'timeout' }), /set "Fly app"/)
+  assert.equal(attachTimeoutHint(base, { flyApp: 'app', isAttach: true, kind: 'timeout' }), base)
+  assert.equal(attachTimeoutHint(base, { isAttach: false, kind: 'timeout' }), base)
+  assert.equal(attachTimeoutHint(base, { isAttach: true, kind: 'auth' }), base)
 })

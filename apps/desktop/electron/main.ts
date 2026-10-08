@@ -10044,6 +10044,9 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
 
   let result: any
 
+  // Set when this attempt had to start the host: its backend needs a moment after ssh answers.
+  let hostStarting = false
+
   try {
     if (created) {
       const transport = isAttach && registryEntry?.flyApp
@@ -10051,9 +10054,10 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
             { host: sshConfig.host, port: sshConfig.port || 22, user: sshConfig.user, flyApp: registryEntry.flyApp },
             {
               signal: lease.signal,
-              onStatus: () => updateBootProgress({
-                phase: 'backend.remote', message: 'Starting host…', running: true, error: null
-              })
+              onStatus: () => {
+                hostStarting = true
+                updateBootProgress({ phase: 'backend.remote', message: 'Starting host…', running: true, error: null })
+              }
             }
           )
         : { route: 'direct' as const, host: sshConfig.host, port: sshConfig.port, user: sshConfig.user }
@@ -10095,11 +10099,17 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
     }
 
     if (isAttach) {
-      result = await sshAttach.attach(ssh, {
+      const attachOptions = {
         pickLocalPort,
         waitForHermes: (baseUrl, token) => waitForHermes(baseUrl, token, lease.signal, 'token'),
         signal: lease.signal
-      })
+      }
+
+      // A host this attempt just started answers ssh before its supervisor has
+      // serve up: wait for it instead of failing the first connect.
+      result = hostStarting
+        ? await sshAttach.attachWhenReady(ssh, attachOptions)
+        : await sshAttach.attach(ssh, attachOptions)
     } else {
       const platform = await detectRemotePlatform(ssh, sshConfig.remoteHermesPath || '')
       const lifecycle = platform.os === 'Windows' ? connectWindowsRemote : remoteLifecycle.connect
@@ -10146,7 +10156,11 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
       }
     }
 
-    const err = new Error(error.message) as any
+    const err = new Error(sshAttach.attachTimeoutHint(error.message, {
+      flyApp: registryEntry?.flyApp,
+      isAttach,
+      kind: error.kind
+    })) as any
     err.sshError = error.kind || 'unknown'
     err.isSshBootstrap = true
     throw err

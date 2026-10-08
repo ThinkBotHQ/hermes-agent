@@ -211,6 +211,55 @@ export async function attach(ssh: AttachSshConnection, opts: AttachOptions = {})
   }
 }
 
+export interface AttachWhenReadyOptions extends AttachOptions {
+  /** How long to keep trying while the host has no backend yet. */
+  waitMs?: number
+  intervalMs?: number
+  sleep?: (ms: number) => Promise<void>
+  now?: () => number
+}
+
+/**
+ * attach(), for a host that was just started. A freshly booted machine answers
+ * ssh a few seconds before its supervisor has `hermes serve` up, and attach()
+ * reports that window as "no backend". Retry only that error, for a bounded
+ * time; every other failure (token mismatch, identity, ssh) surfaces at once.
+ * Still never starts anything on the host.
+ */
+export async function attachWhenReady(ssh: AttachSshConnection, opts: AttachWhenReadyOptions = {}): Promise<AttachResult> {
+  const { intervalMs = 2000, now = Date.now, sleep, waitMs = 45_000, ...attachOpts } = opts
+  const pause = sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)))
+  const deadline = now() + waitMs
+
+  for (;;) {
+    try {
+      return await attach(ssh, attachOpts)
+    } catch (error) {
+      if (!(error instanceof AttachNoBackendError) || attachOpts.signal?.aborted || now() + intervalMs > deadline) {
+        throw error
+      }
+
+      await pause(intervalMs)
+    }
+  }
+}
+
+/**
+ * An attach-only connection whose host does not answer has nothing it can do
+ * about it unless it knows the Fly app to start. Say so, instead of leaving
+ * the generic ssh timeout text as the only clue.
+ */
+export function attachTimeoutHint(
+  message: string,
+  context: { flyApp?: string; isAttach?: boolean; kind?: string }
+): string {
+  if (!context.isAttach || context.flyApp || context.kind !== 'timeout') {
+    return message
+  }
+
+  return `${message} If this host is a Fly machine it may be stopped: set "Fly app" on this connection and Hermes will start it.`
+}
+
 export interface AttachStateCandidate {
   dialIdentity?: string
   kind?: string
