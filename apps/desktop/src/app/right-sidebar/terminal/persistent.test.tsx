@@ -18,6 +18,10 @@ vi.mock('./terminals', () => ({
   ensureTerminal: vi.fn()
 }))
 
+vi.mock('./empty-recovery', () => ({
+  EmptyTerminalRecovery: () => null
+}))
+
 vi.mock('./workspace', () => ({
   TerminalWorkspace: () => <div data-testid="terminal-workspace" />
 }))

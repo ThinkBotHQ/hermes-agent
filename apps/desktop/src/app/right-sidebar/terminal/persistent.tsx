@@ -10,6 +10,7 @@ import { $paneStates } from '@/store/panes'
 
 import { $terminalTakeover } from '../store'
 
+import { EmptyTerminalRecovery } from './empty-recovery'
 import { ensureTerminal } from './terminals'
 import { TerminalWorkspace } from './workspace'
 
@@ -289,6 +290,7 @@ export function PersistentTerminal({ onAddSelectionToChat }: PersistentTerminalP
   return (
     <div aria-hidden={!visible} data-persistent-terminal="" style={style}>
       {mounted && <TerminalWorkspace onAddSelectionToChat={onAddSelectionToChat} />}
+      {visible && <EmptyTerminalRecovery />}
     </div>
   )
 }
