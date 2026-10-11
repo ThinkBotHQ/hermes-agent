@@ -39,12 +39,13 @@ class _StuckWokenSdk:
     """An unclaimed CLI turn that never reports its boundary (its ResultMessage never arrives)."""
 
     def __init__(self):
+        self.active = True
         self.interrupts = 0
         self.callback = None
         self.peer_sent = []
 
     def woken_turn_active(self):
-        return True
+        return self.active
 
     def interrupt_woken_turn(self):
         self.interrupts += 1
@@ -103,10 +104,8 @@ def test_owner_submit_that_never_returns_stops_holding_after_the_bound(bounded):
     assert "_owner_submit_waiting" not in session and "_owner_submit_waiting_since" not in session
 
 
-def test_owner_message_parked_behind_a_woken_turn_that_never_ends_fails_visibly(bounded, monkeypatch):
-    """The b9 path queues owner input until the CLI reports its boundary. When that boundary never comes, the
-    backstop interrupts the turn, waits a bounded time, then fails the owner message VISIBLY and releases the
-    hold (R2-P1-4): it never parks forever, and it is never sent into the still-active stream."""
+def test_owner_message_parked_behind_woken_turn_stays_queued(bounded, monkeypatch):
+    """The recovery bound reports queue status without deleting the owner's words."""
     monkeypatch.setattr(owner_hold, "RECOVERY_TIMEOUT_S", BOUND)
     sdk = _StuckWokenSdk()
     session = _session(sdk)
@@ -120,11 +119,12 @@ def test_owner_message_parked_behind_a_woken_turn_that_never_ends_fails_visibly(
         "session_id": "owner-hold", "text": "> Q5: b, re-arm on a fresh ledger"}})
     assert response["result"]["status"] == "queued"
     assert fired == [] and mailbox._mailbox_auto_blocked(session)
-    assert _wait_for(lambda: any(event == "error" for event, _sid, _p in emitted)), "the owner message was parked"
+    assert _wait_for(lambda: any(event == "status.update" for event, _sid, _p in emitted))
     assert fired == []
-    assert "Send it again" in next(p["message"] for event, _sid, p in emitted if event == "error")
-    assert session["queued_prompt"] is None
-    assert mailbox._mailbox_auto_blocked(session) is False
+    assert not any(event == "error" for event, _sid, _p in emitted)
+    assert [p["kind"] for event, _sid, p in emitted if event == "status.update"] == ["owner_queued"]
+    assert session["queued_prompt"]["text"] == "> Q5: b, re-arm on a fresh ledger"
+    assert mailbox._mailbox_auto_blocked(session) is True
 
 
 def test_owner_message_queued_behind_a_stalled_turn_keeps_peers_behind_it_then_runs_first(bounded, monkeypatch, caplog):
@@ -147,18 +147,25 @@ def test_owner_message_queued_behind_a_stalled_turn_keeps_peers_behind_it_then_r
     assert fired == ["owner answer"]
 
 
-def test_stop_reports_a_queued_owner_message_as_not_delivered(bounded, monkeypatch):
+def test_stop_keeps_queued_owner_message_and_drops_non_owner(bounded, monkeypatch):
     emitted = []
     monkeypatch.setattr(server, "_emit", lambda event, sid, payload=None: emitted.append((event, sid, payload)))
-    session = _session(running=True)
+    sdk = _StuckWokenSdk()
+    session = _session(sdk, running=True)
+    fired = []
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda _r, _sid, _s, text, **_kw: fired.append(text))
     with session["history_lock"]:
         server._enqueue_prompt(session, "please also check CI", None)
         server._enqueue_prompt(session, "peer envelope", None, display_kind="peer_message")
     server._interrupt_session_turn("owner-hold", session, hold_auto_started=True)
-    assert session["queued_prompt"] is None and not session.get("queued_prompts")
-    errors = [payload["message"] for event, sid, payload in emitted if event == "error" and sid == "owner-hold"]
-    assert len(errors) == 1, "exactly the owner message is reported; the peer row stays durable in its mailbox"
-    assert "please also check CI" in errors[0] and "Send it again" in errors[0]
+    assert session["queued_prompt"]["text"] == "please also check CI"
+    assert not session.get("queued_prompts")
+    assert not any(event == "error" for event, _sid, _payload in emitted)
+    assert fired == []
+    sdk.active = False
+    session["running"] = False  # Stop has settled and the CLI has reached its boundary.
+    assert server._drain_queued_prompt("r", "owner-hold", session)
+    assert fired == ["please also check CI"]
 
 
 def test_peer_mail_queued_under_the_hold_drains_after_release(bounded, monkeypatch, tmp_path):

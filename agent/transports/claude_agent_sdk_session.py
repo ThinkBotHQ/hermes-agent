@@ -108,6 +108,7 @@ _RENAME_ACK_TIMEOUT_SECONDS = 10.0
 _NATIVE_PEER_QUERY_TIMEOUT_SECONDS = 5.0
 _NATIVE_PEER_ADMIT_GRACE_SECONDS = 120.0
 _NATIVE_PEER_WRITE_MAX_SECONDS = 60.0
+UNSOLICITED_QUIET_S = 20.0
 
 
 class _RenameClaimDeferred(RuntimeError):
@@ -436,6 +437,10 @@ class ClaudeAgentSdkSession(
         # in flight; the reader keeps routing it to the background path even
         # after a host turn claims the stream (see _reader_loop).
         self._unsolicited_burst_open = False
+        self._unsolicited_quiet_expired = False
+        self._unsolicited_last_top_level_at: Optional[float] = None
+        self._unsolicited_quiet_timer: Optional[threading.Timer] = None
+        self._unsolicited_clock = time.monotonic
         self._native_peer_in_flight = False
         self._native_peer_msg_id: Optional[str] = None
         self._native_peer_seen = False
@@ -1188,6 +1193,10 @@ class ClaudeAgentSdkSession(
         # __new__; __init__ may also have raised before the lock existed).
         admission_lock = getattr(self, "_turn_callback_lock", None)
         with admission_lock if admission_lock is not None else contextlib.nullcontext():
+            timer = getattr(self, "_unsolicited_quiet_timer", None)
+            if timer is not None:
+                timer.cancel()
+                self._unsolicited_quiet_timer = None
             if self._closed:
                 startup_done = (
                     self._startup_done if getattr(self, "_starting", False) else None
@@ -1389,6 +1398,49 @@ class ClaudeAgentSdkSession(
                 return
             if self._native_peer_pending_locked():
                 return
+        self._notify_idle_boundary()
+
+    def _note_unsolicited_activity(self) -> None:
+        """Only top-level CLI output extends an unclaimed turn's quiet window."""
+        with self._turn_callback_lock:
+            self._unsolicited_last_top_level_at = self._unsolicited_clock()
+            if self._unsolicited_quiet_timer is None:
+                timer = threading.Timer(UNSOLICITED_QUIET_S, self._expire_unsolicited_burst)
+                timer.daemon = True
+                self._unsolicited_quiet_timer = timer
+                timer.start()
+
+    def _close_unsolicited_burst(self) -> None:
+        with self._turn_callback_lock:
+            self._unsolicited_burst_open = False
+            self._unsolicited_quiet_expired = False
+            self._unsolicited_last_top_level_at = None
+            timer = self._unsolicited_quiet_timer
+            self._unsolicited_quiet_timer = None
+            if timer is not None:
+                timer.cancel()
+
+    def _expire_unsolicited_burst(self) -> None:
+        """A missing ResultMessage cannot hold the next owner turn indefinitely."""
+        with self._turn_callback_lock:
+            since = self._unsolicited_last_top_level_at
+            if not self._unsolicited_burst_open or since is None or self._closed:
+                return
+            remaining = UNSOLICITED_QUIET_S - (self._unsolicited_clock() - since)
+            if remaining > 0:
+                timer = threading.Timer(remaining, self._expire_unsolicited_burst)
+                timer.daemon = True
+                self._unsolicited_quiet_timer = timer
+                timer.start()
+                return
+            self._unsolicited_burst_open = False
+            self._unsolicited_quiet_expired = True
+            self._unsolicited_last_top_level_at = None
+            timer = self._unsolicited_quiet_timer
+            self._unsolicited_quiet_timer = None
+            if timer is not None:
+                timer.cancel()
+        self._apply_deferred_rename()
         self._notify_idle_boundary()
 
     def woken_turn_active(self) -> bool:

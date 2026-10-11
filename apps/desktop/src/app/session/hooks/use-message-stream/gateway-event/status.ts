@@ -37,6 +37,16 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
   } = deps
 
   if (event.type === 'status.update') {
+    if (payload?.kind === 'owner_queued' && sessionId && isActiveEvent) {
+      const message = coerceGatewayText(payload?.text).trim()
+
+      if (message) {
+        notify({ id: `owner-queued:${sessionId}`, kind: 'info', message, durationMs: 10_000 })
+      }
+
+      return true
+    }
+
     // `compacting`/`compacted` is auto-compaction's pair. Manual /compress
     // pins `compressing` and always clears it with `ready` (the `finally` in
     // methods_session._compress_live). Both spellings drive the same phase —

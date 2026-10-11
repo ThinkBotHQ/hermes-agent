@@ -309,8 +309,7 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
         session["queued_prompt"] = queued
     from tui_gateway.owner_hold import note_owner_queued
 
-    # A queued owner message holds peer/background work only for a bounded time, and its backstop
-    # delivers it at the next boundary even when the CLI never reports one.
+    # A queued owner message keeps peer/background work behind it until its next turn boundary.
     if any(_ac_is_owner_entry(entry) for entry in _owner_hold_entries(session)):
         note_owner_queued(session)
 
@@ -459,7 +458,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             return False
         if _ac_sdk_woken(session):
             # Elapsed time is never a boundary: a prompt sent now would be folded into the unclaimed CLI
-            # turn mid-loop. The owner-hold backstop recovers (interrupt + bounded wait) or fails it visibly.
+            # turn mid-loop. The owner-hold backstop nudges the CLI while preserving this entry.
             return False
         entries = [queued, *(session.get("queued_prompts") or [])]
         owner_index = next((i for i, entry in enumerate(entries) if _ac_is_owner_entry(entry)), None)

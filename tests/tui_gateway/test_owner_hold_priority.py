@@ -86,23 +86,26 @@ def test_backstop_claims_the_session_for_the_owner_before_peers_drain(bounded, m
     assert not any(item[0] == "peers" for item in order), "peers drain after the owner turn, never before"
 
 
-def test_stop_resets_the_owner_hold_clock_for_the_next_owner_message(bounded) -> None:
-    session = _session(running=True)
+def test_stop_preserves_the_owner_hold_clock_until_delivery(bounded, monkeypatch) -> None:
+    sdk = SimpleNamespace(woken_turn_active=lambda: True, interrupt_woken_turn=lambda: True)
+    session = _session(running=True, agent=SimpleNamespace(api_mode="claude_agent_sdk", _claude_sdk_session=sdk))
     with session["history_lock"]:
         server._enqueue_prompt(session, "first", None)
     time.sleep(BOUND + 0.05)
     assert owner_hold.overdue_owner_entry(session) is True
 
     server._interrupt_session_turn("owner-prio", session, hold_auto_started=True)
-    assert "_owner_queued_since" not in session, "Stop discarded the queue: its hold clock goes with it"
-
-    before = time.time()
-    with session["history_lock"]:
-        server._enqueue_prompt(session, "second", None)
-    assert float(session["_owner_queued_since"]) >= before
-    assert owner_hold.overdue_owner_entry(session) is False
+    assert session["queued_prompt"]["text"] == "first"
+    assert owner_hold.overdue_owner_entry(session) is True
     with session["history_lock"]:
         assert owner_hold.owner_pending(session) is True
+    sdk.woken_turn_active = lambda: False
+    fired = []
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda _r, _sid, _s, text, **_kw: fired.append(text))
+    session["running"] = False
+    assert server._drain_queued_prompt("r", "owner-prio", session)
+    assert fired == ["first"]
+    assert "_owner_queued_since" not in session
 
 
 def test_a_queue_discarded_without_the_helper_still_restarts_the_clock(bounded) -> None:

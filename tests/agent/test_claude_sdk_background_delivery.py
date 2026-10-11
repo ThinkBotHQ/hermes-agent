@@ -471,6 +471,221 @@ def test_peer_burst_that_straddles_admission_never_answers_the_host_turn():
     assert session._unsolicited_burst_open is False
 
 
+def test_idle_subagent_assistant_does_not_open_woken_turn():
+    import time as _time
+    from tests.agent.claude_sdk_fakes import (
+        AssistantMessage, StreamEvent, TextBlock, UserMessage, _make_session,
+    )
+
+    session, holder = _make_session()
+    try:
+        session.ensure_started()
+        child_user = UserMessage(content="child task notification")
+        child_user.parent_tool_use_id = "toolu-parent"
+        child_user.origin = {"kind": "task-notification"}
+        holder["client"].feed(
+            AssistantMessage(content=[TextBlock("child progress")], parent_tool_use_id="toolu-parent"),
+            child_user,
+            StreamEvent(parent_tool_use_id="toolu-parent"),
+        )
+        deadline = _time.time() + 2
+        while holder["client"]._pending and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert session.woken_turn_active() is False
+    finally:
+        session.close()
+
+
+def test_top_level_unsolicited_result_closes_woken_turn_once():
+    import time as _time
+    from tests.agent.claude_sdk_fakes import AssistantMessage, ResultMessage, TextBlock, _make_session
+
+    boundaries = []
+    session, holder = _make_session()
+    session.set_idle_boundary_callback(lambda: boundaries.append(True))
+    try:
+        session.ensure_started()
+        holder["client"].feed(AssistantMessage(content=[TextBlock("top-level work")]))
+        deadline = _time.time() + 2
+        while not session.woken_turn_active() and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert session.woken_turn_active() is True
+        holder["client"].feed(ResultMessage(result="done", uuid="woken-result"))
+        while session.woken_turn_active() and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert session.woken_turn_active() is False
+        assert boundaries == [True]
+    finally:
+        session.close()
+
+
+def test_top_level_unsolicited_quiet_interval_fires_boundary_without_result():
+    import time as _time
+    from agent.transports import claude_agent_sdk_session as sdk_module
+    from tests.agent.claude_sdk_fakes import AssistantMessage, TextBlock, _make_session
+
+    now = [100.0]
+    boundaries = []
+    session, holder = _make_session()
+    session._unsolicited_clock = lambda: now[0]
+    session.set_idle_boundary_callback(lambda: boundaries.append(True))
+    try:
+        session.ensure_started()
+        holder["client"].feed(AssistantMessage(content=[TextBlock("top-level work")]))
+        deadline = _time.time() + 2
+        while not session.woken_turn_active() and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert session.woken_turn_active() is True
+        now[0] += sdk_module.UNSOLICITED_QUIET_S + 0.1
+        session._expire_unsolicited_burst()
+        assert session.woken_turn_active() is False
+        assert boundaries == [True]
+    finally:
+        session.close()
+
+
+def test_only_top_level_activity_extends_unsolicited_quiet_window():
+    import time as _time
+    from agent.transports import claude_agent_sdk_session as sdk_module
+    from tests.agent.claude_sdk_fakes import AssistantMessage, TextBlock, _make_session
+
+    now = [100.0]
+    session, holder = _make_session()
+    session._unsolicited_clock = lambda: now[0]
+    try:
+        session.ensure_started()
+        holder["client"].feed(AssistantMessage(content=[TextBlock("top-level work")]))
+        deadline = _time.time() + 2
+        while not session.woken_turn_active() and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert session.woken_turn_active()
+        now[0] += sdk_module.UNSOLICITED_QUIET_S - 1
+        holder["client"].feed(AssistantMessage(content=[TextBlock("more work")]))
+        while session._unsolicited_last_top_level_at != now[0] and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert session._unsolicited_last_top_level_at == now[0]
+        now[0] += 2
+        assert session.woken_turn_active()
+        holder["client"].feed(AssistantMessage(
+            content=[TextBlock("child noise")], parent_tool_use_id="toolu-parent"))
+        while holder["client"]._pending and _time.time() < deadline:
+            _time.sleep(0.01)
+        now[0] += sdk_module.UNSOLICITED_QUIET_S
+        session._expire_unsolicited_burst()
+        assert session.woken_turn_active() is False
+    finally:
+        session.close()
+
+
+def _gateway_owner_for_sdk(monkeypatch, sdk):
+    import contextlib
+    import threading
+    from types import SimpleNamespace
+    from tui_gateway import server, session_mailbox
+
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_a: None)
+    monkeypatch.setattr(server, "_session_profile_runtime_scope", lambda _s, **_kw: contextlib.nullcontext())
+    monkeypatch.setattr(server, "_start_session_work", lambda target, **_kw: target())
+    monkeypatch.setattr(session_mailbox, "schedule_drain", lambda *_a, **_kw: None)
+    monkeypatch.setattr(session_mailbox, "drain_session", lambda *_a, **_kw: 0)
+    fired = []
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda _r, _sid, _s, text, **_kw: fired.append(text))
+    gateway_session = {
+        "agent": SimpleNamespace(api_mode="claude_agent_sdk", _claude_sdk_session=sdk),
+        "session_key": "sdk-owner-boundary", "history": [], "history_lock": threading.RLock(),
+        "history_version": 0, "running": False, "transport": None, "attached_images": [],
+        "image_counter": 0, "cols": 80, "slash_worker": None, "show_reasoning": False,
+        "tool_progress_mode": "all",
+    }
+    monkeypatch.setitem(server._sessions, "sdk-owner-boundary", gateway_session)
+    return server, gateway_session, fired
+
+
+def test_idle_subagent_output_allows_immediate_owner_dispatch(monkeypatch):
+    import time as _time
+    from tests.agent.claude_sdk_fakes import AssistantMessage, TextBlock, _make_session
+
+    sdk, holder = _make_session()
+    server, gateway_session, fired = _gateway_owner_for_sdk(monkeypatch, sdk)
+    try:
+        sdk.ensure_started()
+        holder["client"].feed(AssistantMessage(
+            content=[TextBlock("child progress")], parent_tool_use_id="toolu-parent"))
+        deadline = _time.time() + 2
+        while holder["client"]._pending and _time.time() < deadline:
+            _time.sleep(0.01)
+        response = server.handle_request({"id": "owner", "method": "prompt.submit",
+                                          "params": {"session_id": "sdk-owner-boundary", "text": "owner next"}})
+        assert response["result"]["status"] == "streaming"
+        assert fired == ["owner next"]
+        assert gateway_session.get("queued_prompt") is None
+    finally:
+        sdk.close()
+
+
+def test_quiet_sdk_boundary_drains_queued_owner_prompt_once(monkeypatch):
+    import time as _time
+    from agent.transports import claude_agent_sdk_session as sdk_module
+    from tests.agent.claude_sdk_fakes import AssistantMessage, TextBlock, _make_session
+
+    now = [100.0]
+    sdk, holder = _make_session()
+    sdk._unsolicited_clock = lambda: now[0]
+    server, gateway_session, fired = _gateway_owner_for_sdk(monkeypatch, sdk)
+    try:
+        sdk.ensure_started()
+        holder["client"].feed(AssistantMessage(content=[TextBlock("top-level work")]))
+        deadline = _time.time() + 2
+        while not sdk.woken_turn_active() and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert sdk.woken_turn_active()
+        response = server.handle_request({"id": "owner", "method": "prompt.submit",
+                                          "params": {"session_id": "sdk-owner-boundary", "text": "owner next"}})
+        assert response["result"]["status"] == "queued"
+        assert gateway_session["queued_prompt"]["text"] == "owner next"
+        now[0] += sdk_module.UNSOLICITED_QUIET_S + 0.1
+        sdk._expire_unsolicited_burst()
+        assert fired == ["owner next"]
+        sdk._expire_unsolicited_burst()
+        assert fired == ["owner next"]
+    finally:
+        sdk.close()
+
+
+def test_late_result_after_quiet_boundary_cannot_answer_owner_turn():
+    import time as _time
+    from agent.transports import claude_agent_sdk_session as sdk_module
+    from tests.agent.claude_sdk_fakes import AssistantMessage, ResultMessage, TextBlock, _make_session
+
+    now = [100.0]
+    sdk, holder = _make_session(script=[
+        AssistantMessage(content=[TextBlock("owner answer")]),
+        ResultMessage(result="owner answer", uuid="owner-result"),
+    ])
+    sdk._unsolicited_clock = lambda: now[0]
+    try:
+        sdk.ensure_started()
+        client = holder["client"]
+        client.feed(AssistantMessage(content=[TextBlock("old burst")]))
+        deadline = _time.time() + 2
+        while not sdk.woken_turn_active() and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert sdk.woken_turn_active()
+        now[0] += sdk_module.UNSOLICITED_QUIET_S + 0.1
+        sdk._expire_unsolicited_burst()
+        real_query = client.query
+
+        async def query_after_late_result(text):
+            client.feed(ResultMessage(result="late burst result", uuid="late-result"))
+            await real_query(text)
+
+        client.query = query_after_late_result
+        turn = sdk.run_turn("owner prompt", turn_timeout=5.0)
+        assert turn.final_text == "owner answer"
+    finally:
+        sdk.close()
+
+
 def test_host_prompt_folded_into_a_peer_turn_answers_the_host_turn():
     """Live 2026-09-24 (session ce3d96): a peer turn was running when the owner's prompt
     arrived. The CLI folded the queued prompt into that turn at a tool boundary (it replays

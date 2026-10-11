@@ -106,21 +106,54 @@ def _errors(h):
             if event == "error" and sid == SID and isinstance(payload, dict)]
 
 
-def test_owner_prompt_never_enters_an_sdk_turn_that_never_ends_and_fails_visibly(harness) -> None:
+def test_idle_owner_prompt_dispatches_immediately(harness) -> None:
+    sdk = _WokenSdk()
+    sdk.active = False
+    session = _session(sdk)
+    server._sessions[SID] = session
+    harness.sdk = sdk
+    response = server.handle_request({"id": "idle", "method": "prompt.submit",
+                                      "params": {"session_id": SID, "text": "owner reply"}})
+    assert response["result"]["status"] == "streaming"
+    assert harness.fired == [("owner reply", False)]
+
+
+def test_owner_prompt_remains_queued_when_sdk_turn_has_no_result(harness) -> None:
     sdk = _WokenSdk(ends_on_interrupt=None)
     session = _session(sdk)
     _submit(session, harness, sdk, "ship the hotfix after CI")
 
-    assert _wait_for(lambda: _errors(harness)), "the parked owner message must end as a visible error"
-    time.sleep(BOUND + RECOVERY)  # nothing may fire later either
+    assert _wait_for(lambda: any(event == "status.update" for event, _sid, _payload in harness.emitted))
+    time.sleep(BOUND + RECOVERY + 0.1)  # the recovery retry still must not delete or re-report it
     assert harness.fired == [], "the owner prompt was passed to query() on the still-active stream"
-    errors = _errors(harness)
-    assert len(errors) == 1
-    assert "Not delivered" in errors[0] and "ship the hotfix after CI" in errors[0] and "Send it again" in errors[0]
+    assert _errors(harness) == []
+    statuses = [payload for event, _sid, payload in harness.emitted if event == "status.update"]
+    assert len(statuses) == 1 and statuses[0]["kind"] == "owner_queued"
+    assert "queued behind a background turn" in statuses[0]["text"]
     assert sdk.interrupts >= 2, "the bound must first try explicit recovery (interrupt, then wait)"
-    assert session["queued_prompt"] is None and not session.get("queued_prompts")
-    assert mailbox._mailbox_auto_blocked(session) is False, "the failed owner message releases the hold"
-    assert "_owner_queued_since" not in session and "_owner_recovery_since" not in session
+    assert session["queued_prompt"]["text"] == "ship the hotfix after CI"
+    assert mailbox._mailbox_auto_blocked(session) is True
+    sdk.active = False
+    assert sdk.callback is not None
+    sdk.callback()
+    assert harness.fired == [("ship the hotfix after CI", False)]
+
+
+def test_resent_owner_messages_remain_in_order_and_deliver_once(harness) -> None:
+    sdk = _WokenSdk()
+    session = _session(sdk)
+    _submit(session, harness, sdk, "first")
+    _submit(session, harness, sdk, "second")
+    # Plain text uses the existing lossless consecutive-user coalescing rule.
+    assert session["queued_prompt"]["text"] == "first\n\nsecond"
+    assert not session.get("queued_prompts")
+    sdk.active = False
+    assert sdk.callback is not None
+    sdk.callback()
+    assert harness.fired == [("first\n\nsecond", False)]
+    sdk.callback()
+    assert harness.fired == [("first\n\nsecond", False)]
+    assert session.get("queued_prompt") is None
 
 
 def test_owner_prompt_is_delivered_at_the_boundary_that_follows_the_recovery_interrupt(harness) -> None:

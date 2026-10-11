@@ -96,6 +96,8 @@ def _is_injected_origin(origin: Any) -> bool:
 
 def _starts_injected_turn(message: Any) -> bool:
     """An injected user message, or assistant output with no turn in flight."""
+    if getattr(message, "parent_tool_use_id", None) is not None:
+        return False
     name = type(message).__name__
     if name == "UserMessage":
         return _is_injected_origin(effective_origin(message))
@@ -105,6 +107,8 @@ def _starts_injected_turn(message: Any) -> bool:
 def _is_own_prompt_echo(message: Any) -> bool:
     """A replayed Hermes prompt: the CLI has moved on to the host's own turn."""
     if type(message).__name__ != "UserMessage":
+        return False
+    if getattr(message, "parent_tool_use_id", None) is not None:
         return False
     if _is_injected_origin(effective_origin(message)):
         return False  # a peer envelope is never the host's own prompt
@@ -1732,7 +1736,7 @@ class ClaudeSdkTurnMixin:
                             # (cntrl carry) Its pre-fold partial text must never
                             # attach to a later unrelated result.
                             self._host_prompt_folded = True
-                            self._unsolicited_burst_open = False
+                            self._close_unsolicited_burst()
                             self._native_peer_in_flight = False
                             self._native_peer_msg_id = None
                             self._native_peer_seen = False
@@ -1747,10 +1751,23 @@ class ClaudeSdkTurnMixin:
                             _clear_unsolicited_projection(self)
                             inbox.put_nowait(message)
                         else:
+                            if (getattr(message, "parent_tool_use_id", None) is None
+                                    and type(message).__name__ != "ResultMessage"):
+                                self._note_unsolicited_activity()
                             self._handle_unsolicited(message)
                             if type(message).__name__ == "ResultMessage":
-                                self._unsolicited_burst_open = False
+                                self._close_unsolicited_burst()
                                 self._apply_deferred_rename()
+                                self._notify_idle_boundary()
+                    elif inbox is not None and self._unsolicited_quiet_expired:
+                        # A terminal result can arrive after the quiet boundary. It still
+                        # belongs to the old burst until the CLI echoes this host prompt.
+                        if _is_own_prompt_echo(message):
+                            self._unsolicited_quiet_expired = False
+                            inbox.put_nowait(message)
+                        else:
+                            self._handle_unsolicited(message)
+                            if type(message).__name__ == "ResultMessage":
                                 self._notify_idle_boundary()
                     elif inbox is not None:
                         inbox.put_nowait(message)
@@ -1762,9 +1779,13 @@ class ClaudeSdkTurnMixin:
                     else:
                         if _starts_injected_turn(message):
                             self._unsolicited_burst_open = True
+                            self._unsolicited_quiet_expired = False
+                        if (self._unsolicited_burst_open and getattr(message, "parent_tool_use_id", None) is None
+                                and type(message).__name__ != "ResultMessage"):
+                            self._note_unsolicited_activity()
                         self._handle_unsolicited(message)
                         if type(message).__name__ == "ResultMessage":
-                            self._unsolicited_burst_open = False
+                            self._close_unsolicited_burst()
                             self._apply_deferred_rename()
                             self._notify_idle_boundary()
                     # Message wins ties with a claim. Re-arm first, then loop:

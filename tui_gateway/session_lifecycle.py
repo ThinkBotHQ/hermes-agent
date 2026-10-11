@@ -618,16 +618,6 @@ def _ws_session_is_orphaned(session: dict | None) -> bool:
     return bool(_ws_session_is_detached(session) and not session.get("running"))
 
 
-def _emit_owner_not_delivered(sid: str, entry: dict) -> None:
-    text = entry.get("text")
-    preview = " ".join(text.split()) if isinstance(text, str) else "your message with attachments"
-    preview = preview if len(preview) <= 80 else preview[:79] + "\u2026"
-    logger.warning("owner hold: Stop discarded a queued owner message on %s; reporting it as not delivered", sid)
-    with contextlib.suppress(Exception):
-        _emit("error", sid, {"message": f"Not delivered: \u201c{preview}\u201d was waiting behind the turn you "
-                                        "stopped, so it never reached the session. Send it again."})
-
-
 def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None = None,
                             hold_auto_started: bool = False) -> bool:
     """Apply the shared ``session.interrupt`` contract to one claimed session; returns whether the compute-host control
@@ -650,17 +640,16 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
         session["_turn_cancel_requested"] = True
         if hold_auto_started:
             set_stop_hold(session)
-        dropped_owner = [entry for entry in ([session.get("queued_prompt")] + list(session.get("queued_prompts") or []))
+        owner_entries = [entry for entry in ([session.get("queued_prompt")] + list(session.get("queued_prompts") or []))
                          if isinstance(entry, dict) and _ac_is_owner_entry(entry)]
-        session["queued_prompt"] = None
-        session.pop("queued_prompts", None)
-        session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
-        # The discarded owner input takes its hold clock with it: the next owner message gets a fresh bound.
-        owner_queue_discarded(session)
-    # Stop cancels what was queued behind the stopped turn. An owner message there was drawn as sent: say
-    # it was not delivered (the client's error card carries Retry) instead of dropping it silently.
-    for entry in dropped_owner:
-        _emit_owner_not_delivered(sid, entry)
+        session["queued_prompt"] = owner_entries[0] if owner_entries else None
+        if len(owner_entries) > 1:
+            session["queued_prompts"] = owner_entries[1:]
+        else:
+            session.pop("queued_prompts", None)
+        if not owner_entries:
+            session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
+            owner_queue_discarded(session)
     if should_interrupt:
         # Sibling of gateway/run_agent_cache.py::_interrupt_and_clear_session: a user-initiated stop of a
         # live TUI/desktop turn is the same "loop is gone" event for plugins holding per-turn external
@@ -693,6 +682,9 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
                     session["running"] = False
                     _clear_inflight_turn(session)
     _clear_pending(sid)
+    if owner_entries and not session.get("running"):
+        from tui_gateway.session_mailbox import _sdk_turn_boundary
+        _sdk_turn_boundary(sid, session)
     with contextlib.suppress(Exception):
         from tools.approval import resolve_gateway_approval
         resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
