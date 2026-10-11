@@ -479,6 +479,7 @@ export const en: Translations = {
     copyDetail: 'Copy detail',
     copyDetailFailed: 'Could not copy notification detail',
     compressDeferredDone: 'Context compression finished',
+    ownerQueued: 'Your message is queued behind a background turn and will send when it finishes.',
     backendOutOfDateTitle: 'Backend out of date',
     backendOutOfDateMessage:
       'Your Hermes backend is older than this desktop build and may not work correctly. Update to align them.',

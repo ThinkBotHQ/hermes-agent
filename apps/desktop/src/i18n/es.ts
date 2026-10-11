@@ -489,6 +489,7 @@ export const esOverrides = {
     details: 'Detalles',
     copyDetail: 'Copiar detalle',
     copyDetailFailed: 'No se pudo copiar el detalle de la notificación',
+    ownerQueued: 'Tu mensaje está en cola detrás de un turno en segundo plano y se enviará cuando termine.',
     backendOutOfDateTitle: 'Backend desactualizado',
     backendOutOfDateMessage:
       'Tu backend de Hermes es más antiguo que esta compilación de escritorio y puede no funcionar correctamente. Actualízalo para alinearlos.',

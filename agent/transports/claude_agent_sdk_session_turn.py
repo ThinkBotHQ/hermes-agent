@@ -1696,11 +1696,13 @@ class ClaudeSdkTurnMixin:
         from agent.transports.claude_agent_sdk_session import _RenameClaimDeferred
 
         end: _StreamEnd
-        iterator = self._client.receive_messages().__aiter__()
-        message_task = asyncio.ensure_future(iterator.__anext__())
-        claim_task = asyncio.ensure_future(self._turn_claims.get())
+        message_task = None
+        claim_task = None
         pending_turn_claims = []
         try:
+            iterator = self._client.receive_messages().__aiter__()
+            message_task = asyncio.ensure_future(iterator.__anext__())
+            claim_task = asyncio.ensure_future(self._turn_claims.get())
             while True:
                 done, _pending = await asyncio.wait(
                     (message_task, claim_task),
@@ -1736,7 +1738,7 @@ class ClaudeSdkTurnMixin:
                             # (cntrl carry) Its pre-fold partial text must never
                             # attach to a later unrelated result.
                             self._host_prompt_folded = True
-                            self._close_unsolicited_burst()
+                            self._close_unsolicited_burst("host-prompt")
                             self._native_peer_in_flight = False
                             self._native_peer_msg_id = None
                             self._native_peer_seen = False
@@ -1756,7 +1758,7 @@ class ClaudeSdkTurnMixin:
                                 self._note_unsolicited_activity()
                             self._handle_unsolicited(message)
                             if type(message).__name__ == "ResultMessage":
-                                self._close_unsolicited_burst()
+                                self._close_unsolicited_burst("result")
                                 self._apply_deferred_rename()
                                 self._notify_idle_boundary()
                     elif inbox is not None and self._unsolicited_quiet_expired:
@@ -1778,6 +1780,21 @@ class ClaudeSdkTurnMixin:
                         self._resume_backlog.append(message)
                     else:
                         if _starts_injected_turn(message):
+                            if not self._unsolicited_burst_open:
+                                tool_or_agent = next(
+                                    (str(getattr(block, "name", "")) for block in
+                                     (getattr(message, "content", None) or [])
+                                     if type(block).__name__ == "ToolUseBlock" and getattr(block, "name", None)),
+                                    str(getattr(message, "agent_type", "") or getattr(message, "name", "") or ""),
+                                )
+                                logger.info(
+                                    "claude-agent-sdk: unsolicited burst opened session=%s type=%s "
+                                    "top_level=%s tool_or_agent=%s",
+                                    self._hermes_session_id or self._session_id or "pending",
+                                    type(message).__name__,
+                                    getattr(message, "parent_tool_use_id", None) is None,
+                                    tool_or_agent or "none",
+                                )
                             self._unsolicited_burst_open = True
                             self._unsolicited_quiet_expired = False
                         if (self._unsolicited_burst_open and getattr(message, "parent_tool_use_id", None) is None
@@ -1785,7 +1802,7 @@ class ClaudeSdkTurnMixin:
                             self._note_unsolicited_activity()
                         self._handle_unsolicited(message)
                         if type(message).__name__ == "ResultMessage":
-                            self._close_unsolicited_burst()
+                            self._close_unsolicited_burst("result")
                             self._apply_deferred_rename()
                             self._notify_idle_boundary()
                     # Message wins ties with a claim. Re-arm first, then loop:
@@ -1854,8 +1871,10 @@ class ClaudeSdkTurnMixin:
                     continue
                 claim_ack.set_result(None)
         except asyncio.CancelledError:  # pragma: no cover - shutdown path
-            message_task.cancel()
-            claim_task.cancel()
+            if message_task is not None:
+                message_task.cancel()
+            if claim_task is not None:
+                claim_task.cancel()
             # Cancellation is the reader's terminal edge too. A queued claim
             # must be released below or the foreground coroutine waits until
             # its watchdog fires against a session that is already gone.
@@ -1867,9 +1886,9 @@ class ClaudeSdkTurnMixin:
             )
             end = _StreamEnd(error=_safe_sdk_error_text(exc))
         finally:
-            if not message_task.done():
+            if message_task is not None and not message_task.done():
                 message_task.cancel()
-            if not claim_task.done():
+            if claim_task is not None and not claim_task.done():
                 claim_task.cancel()
         # The stream is gone (CLI exited or transport died). Mark it before
         # acknowledging every queued ownership operation.  A foreground turn
@@ -1882,7 +1901,7 @@ class ClaudeSdkTurnMixin:
         if pending_ack is not None and not pending_ack.done():
             pending_ack.set_result(None)
         pending_claims = []
-        if claim_task.done() and not claim_task.cancelled():
+        if claim_task is not None and claim_task.done() and not claim_task.cancelled():
             try:
                 pending_claims.append(claim_task.result())
             except Exception:  # pragma: no cover - queue task failed
@@ -1903,6 +1922,19 @@ class ClaudeSdkTurnMixin:
         inbox = self._turn_inbox
         if inbox is not None:
             inbox.put_nowait(end)
+        self._close_unsolicited_burst("stream-ended")
+        _clear_unsolicited_projection(self)
+        with self._turn_callback_lock:
+            self._native_peer_gen += 1
+            self._clear_native_peer_locked()
+            self._turn_claim_requested = False
+            self._turn_claim_ack = None
+            self._rename_claim_requested = False
+            self._pending_rename_ack = None
+            self._deferred_rename = None
+            self._resume_backlog = None
+            self._turn_claims = None
+        self._notify_idle_boundary()
 
     def _ensure_unsolicited_header_emitted(self) -> None:
         if getattr(self, "_unsolicited_header_emitted", False):
@@ -2253,9 +2285,10 @@ class ClaudeSdkTurnMixin:
                 )
                 return
             logger.info(
-                "claude-agent-sdk: delivering unsolicited result burst "
+                "claude-agent-sdk: delivering unsolicited result burst session=%s "
                 "(background task finished, total=%d, %d message(s), "
                 "%d chars, %d item(s))",
+                self._hermes_session_id or self._session_id or "pending",
                 self._unsolicited_results, len(texts),
                 sum(len(t) for t in texts), len(unsolicited_items),
             )
@@ -2310,7 +2343,8 @@ class ClaudeSdkTurnMixin:
             if message_text:
                 self._unsolicited_text.append(message_text)
             logger.info(
-                "claude-agent-sdk: unsolicited %s outside a turn", name,
+                "claude-agent-sdk: unsolicited %s outside a turn session=%s",
+                name, self._hermes_session_id or self._session_id or "pending",
             )
         else:
             logger.debug(

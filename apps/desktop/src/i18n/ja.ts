@@ -180,6 +180,7 @@ export const ja = defineLocale({
     details: '詳細',
     copyDetail: '詳細をコピー',
     copyDetailFailed: '通知の詳細をコピーできませんでした',
+    ownerQueued: 'メッセージはバックグラウンドの処理が終わるまで待機し、完了後に送信されます。',
     backendOutOfDateTitle: 'バックエンドが古いです',
     backendOutOfDateMessage:
       'Hermes バックエンドがこのデスクトップビルドより古く、正常に動作しない場合があります。更新して揃えてください。',

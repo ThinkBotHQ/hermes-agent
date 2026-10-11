@@ -186,6 +186,7 @@ export const ar = defineLocale({
     details: 'التفاصيل',
     copyDetail: 'نسخ التفاصيل',
     copyDetailFailed: 'تعذر نسخ تفاصيل الإشعار',
+    ownerQueued: 'رسالتك في الانتظار خلف دور يعمل في الخلفية، وستُرسل عند انتهائه.',
     backendOutOfDateTitle: 'الخلفية قديمة',
     backendOutOfDateMessage: 'خلفية Hermes أقدم من إصدار سطح المكتب الحالي وقد لا تعمل كما يجب. حدثهما ليتوافقا.',
     updateHermes: 'تحديث Hermes',

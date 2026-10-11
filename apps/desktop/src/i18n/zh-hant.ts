@@ -176,6 +176,7 @@ export const zhHant = defineLocale({
     details: '詳細資訊',
     copyDetail: '複製詳情',
     copyDetailFailed: '無法複製通知詳情',
+    ownerQueued: '您的訊息正在等待背景回合結束，屆時會自動送出。',
     backendOutOfDateTitle: '後端版本過舊',
     backendOutOfDateMessage: '您的 Hermes 後端早於目前的桌面版本，可能無法正常運作。請更新以保持一致。',
     installMethodUnsupportedTitle: '不受支援的安裝方式',

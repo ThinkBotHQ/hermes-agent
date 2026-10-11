@@ -489,6 +489,7 @@ export const frOverrides = {
     details: 'Détails',
     copyDetail: 'Copier le détail',
     copyDetailFailed: 'Impossible de copier le détail de la notification',
+    ownerQueued: 'Votre message attend la fin d’un tour en arrière-plan et sera envoyé ensuite.',
     backendOutOfDateTitle: 'Backend obsolète',
     backendOutOfDateMessage:
       'Votre backend Hermes est plus ancien que cette version du desktop et peut ne pas fonctionner correctement. Mettez-le à jour pour les aligner.',

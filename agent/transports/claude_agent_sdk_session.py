@@ -1410,15 +1410,19 @@ class ClaudeAgentSdkSession(
                 self._unsolicited_quiet_timer = timer
                 timer.start()
 
-    def _close_unsolicited_burst(self) -> None:
+    def _close_unsolicited_burst(self, reason: str, *, quiet_expired: bool = False) -> None:
         with self._turn_callback_lock:
+            was_open = self._unsolicited_burst_open
             self._unsolicited_burst_open = False
-            self._unsolicited_quiet_expired = False
+            self._unsolicited_quiet_expired = quiet_expired
             self._unsolicited_last_top_level_at = None
             timer = self._unsolicited_quiet_timer
             self._unsolicited_quiet_timer = None
             if timer is not None:
                 timer.cancel()
+        if was_open:
+            logger.info("claude-agent-sdk: unsolicited burst closed session=%s reason=%s",
+                        self._hermes_session_id or self._session_id or "pending", reason)
 
     def _expire_unsolicited_burst(self) -> None:
         """A missing ResultMessage cannot hold the next owner turn indefinitely."""
@@ -1433,13 +1437,7 @@ class ClaudeAgentSdkSession(
                 self._unsolicited_quiet_timer = timer
                 timer.start()
                 return
-            self._unsolicited_burst_open = False
-            self._unsolicited_quiet_expired = True
-            self._unsolicited_last_top_level_at = None
-            timer = self._unsolicited_quiet_timer
-            self._unsolicited_quiet_timer = None
-            if timer is not None:
-                timer.cancel()
+            self._close_unsolicited_burst("quiet-interval", quiet_expired=True)
         self._apply_deferred_rename()
         self._notify_idle_boundary()
 

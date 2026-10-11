@@ -38,11 +38,12 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
 
   if (event.type === 'status.update') {
     if (payload?.kind === 'owner_queued' && sessionId && isActiveEvent) {
-      const message = coerceGatewayText(payload?.text).trim()
-
-      if (message) {
-        notify({ id: `owner-queued:${sessionId}`, kind: 'info', message, durationMs: 10_000 })
-      }
+      notify({
+        id: `owner-queued:${sessionId}`,
+        kind: 'info',
+        message: translateNow('notifications.ownerQueued'),
+        durationMs: 10_000
+      })
 
       return true
     }

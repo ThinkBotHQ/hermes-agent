@@ -5,6 +5,7 @@
 // where retrying reproduces the failure.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { setRuntimeI18nLocale, TRANSLATIONS } from '@/i18n'
 import { $notifications } from '@/store/notifications'
 
 import { handleStatusEvent } from './status'
@@ -46,6 +47,7 @@ function errorContext(message: string) {
 
 afterEach(() => {
   $notifications.set([])
+  setRuntimeI18nLocale('en')
 })
 
 describe('gateway `error` event → error card + toast', () => {
@@ -87,5 +89,23 @@ describe('gateway `error` event → error card + toast', () => {
     const toast = $notifications.get()[0]
     expect(toast.message).toBe(serverCopy)
     expect(toast.detail).toBeUndefined()
+  })
+})
+
+describe('queued owner status', () => {
+  it('shows localized informational copy without creating an error card', () => {
+    setRuntimeI18nLocale('es')
+    const { ctx, failAssistantMessage } = errorContext('unused')
+    ctx.payload = { kind: 'owner_queued', text: 'backend copy' } as GatewayEventContext['payload']
+    ctx.event = { payload: ctx.payload, session_id: 'sess-1', type: 'status.update' }
+    ctx.isActiveEvent = true
+
+    expect(handleStatusEvent(ctx)).toBe(true)
+    expect($notifications.get()[0]).toMatchObject({
+      id: 'owner-queued:sess-1',
+      kind: 'info',
+      message: TRANSLATIONS.es.notifications.ownerQueued
+    })
+    expect(failAssistantMessage).not.toHaveBeenCalled()
   })
 })

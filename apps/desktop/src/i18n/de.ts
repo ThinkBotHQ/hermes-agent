@@ -489,6 +489,7 @@ export const deOverrides = {
     details: 'Details',
     copyDetail: 'Detail kopieren',
     copyDetailFailed: 'Notification-Detail konnte nicht kopiert werden',
+    ownerQueued: 'Ihre Nachricht wartet auf einen Hintergrunddurchlauf und wird gesendet, sobald er abgeschlossen ist.',
     backendOutOfDateTitle: 'Backend veraltet',
     backendOutOfDateMessage:
       'Ihr Hermes-Backend ist älter als dieser Desktop-Build und funktioniert möglicherweise nicht richtig. Aktualisieren Sie, um beide abzugleichen.',

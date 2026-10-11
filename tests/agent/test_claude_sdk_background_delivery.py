@@ -652,6 +652,204 @@ def test_quiet_sdk_boundary_drains_queued_owner_prompt_once(monkeypatch):
         sdk.close()
 
 
+def test_dead_cli_releases_queued_owner_and_restarts_on_drain(monkeypatch, caplog):
+    import logging
+    import threading
+    import time as _time
+    from functools import partial
+
+    from agent import claude_sdk_runtime_session as runtime_session
+    from tui_gateway import tool_progress
+    from tests.agent.claude_sdk_fakes import (
+        _EOS, AssistantMessage, ResultMessage, TextBlock, _make_session,
+    )
+
+    sdk, holder = _make_session()
+    server, gateway_session, fired = _gateway_owner_for_sdk(monkeypatch, sdk)
+    agent = _make_agent()
+    agent.api_mode = "claude_agent_sdk"
+    agent._claude_sdk_session = sdk
+    gateway_session["agent"] = agent
+    fresh_clients = []
+    results = []
+    workers = []
+    subagent_events = []
+
+    def create_fresh(_agent, **_kwargs):
+        fresh, fresh_holder = _make_session(script=[ResultMessage(result="new answer")])
+        fresh_clients.append(fresh_holder)
+        _agent._claude_sdk_session = fresh
+        return fresh
+
+    def dispatch(_rid, _sid, _session, text, **_kwargs):
+        fired.append(text)
+        results.append(run_claude_agent_sdk_turn(
+            agent, user_message=text, original_user_message=text,
+            messages=[{"role": "user", "content": text}], effective_task_id="t",
+        ))
+
+    monkeypatch.setattr(runtime_session, "_create_session", create_fresh)
+    monkeypatch.setattr(server, "_run_prompt_submit", dispatch)
+    monkeypatch.setattr(tool_progress, "_emit", lambda event, sid, payload: subagent_events.append((event, sid, payload)),
+                        raising=False)
+    def start_work(target, **_kwargs):
+        worker = threading.Thread(target=target, daemon=True)
+        workers.append(worker)
+        worker.start()
+
+    monkeypatch.setattr(server, "_start_session_work", start_work)
+    caplog.set_level(logging.INFO)
+    try:
+        sdk.ensure_started()
+        dead_client = holder["client"]
+        dead_client.feed(AssistantMessage(content=[TextBlock("partial background work")]))
+        deadline = _time.time() + 3
+        while not sdk.woken_turn_active() and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert sdk.woken_turn_active()
+        response = server.handle_request({"id": "owner", "method": "prompt.submit",
+                                          "params": {"session_id": "sdk-owner-boundary", "text": "owner next"}})
+        assert response["result"]["status"] == "queued"
+        sdk._sdk_task_records = {"child-1": {"goal": "background child", "parent_tool_id": None}}
+        agent.tool_progress_callback = lambda event, name, preview, args, **kw: tool_progress._on_tool_progress(
+            "sdk-owner-boundary", event, name, preview, args, **kw
+        )
+        sdk._on_subagent_event = partial(runtime_session._on_sdk_subagent_event, agent)
+        dead_client.feed(_EOS)
+        while sdk._stream_ended is None and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert sdk._stream_ended is not None
+        while not results and _time.time() < deadline:
+            _time.sleep(0.01)
+        for worker in workers:
+            worker.join(timeout=1)
+        assert sdk.woken_turn_active() is False
+        assert sdk._unsolicited_text == []
+        assert sdk._unsolicited_items == []
+        assert sdk._unsolicited_tool_items == {}
+        assert sdk._unsolicited_seen == set()
+        assert sdk._native_peer_written is False
+        assert sdk._turn_inbox is None
+        assert sdk._turn_claim_requested is False
+        assert sdk._turn_claims is None
+        assert sdk._rename_claim_requested is False
+        assert sdk._pending_rename_ack is None
+        assert sdk._deferred_rename is None
+        assert sdk._resume_backlog is None
+        assert sdk._sdk_task_records == {}
+        assert [(event, sid, payload["status"]) for event, sid, payload in subagent_events] == [
+            ("subagent.complete", "sdk-owner-boundary", "interrupted")
+        ]
+        assert sum("unsolicited burst closed" in record.message and "reason=stream-ended" in record.message
+                   for record in caplog.records) == 1
+        assert fired == ["owner next"]
+        assert len(fresh_clients) == 1
+        assert fresh_clients[0]["client"].queried == ["owner next"]
+        assert results[0]["final_response"] == "new answer"
+        assert gateway_session.get("queued_prompt") is None
+    finally:
+        sdk.close()
+        if agent._claude_sdk_session is not sdk:
+            agent._claude_sdk_session.close()
+
+
+def test_reader_start_error_reaches_idle_boundary():
+    import time as _time
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+    from tests.agent.claude_sdk_fakes import _FakeClient
+
+    class BrokenClient(_FakeClient):
+        def receive_messages(self):
+            raise RuntimeError("transport failed")
+
+    boundaries = []
+    sdk = ClaudeAgentSdkSession(cwd="/tmp", client_factory=lambda **_kw: BrokenClient())
+    sdk.set_idle_boundary_callback(lambda: boundaries.append(True))
+    try:
+        sdk.ensure_started()
+        deadline = _time.time() + 2
+        while sdk._stream_ended is None and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert sdk._stream_ended is not None
+        assert sdk._stream_ended.error == "transport failed"
+        assert boundaries == [True]
+    finally:
+        sdk.close()
+
+
+def test_quiet_timer_closes_without_another_reader_message(monkeypatch, caplog):
+    import logging
+    import time as _time
+    from agent.transports import claude_agent_sdk_session as sdk_module
+    from tests.agent.claude_sdk_fakes import AssistantMessage, TextBlock, _make_session
+
+    now = [100.0]
+    scheduled = []
+
+    class Timer:
+        def __init__(self, interval, callback):
+            self.interval, self.callback = interval, callback
+            self.daemon = False
+
+        def start(self):
+            scheduled.append(self)
+
+        def cancel(self):
+            pass
+
+    sdk, holder = _make_session()
+    sdk._unsolicited_clock = lambda: now[0]
+    boundaries = []
+    sdk.set_idle_boundary_callback(lambda: boundaries.append(True))
+    try:
+        caplog.set_level(logging.INFO)
+        sdk.ensure_started()
+        monkeypatch.setattr(sdk_module.threading, "Timer", Timer)
+        holder["client"].feed(AssistantMessage(content=[TextBlock("background")]))
+        deadline = _time.time() + 2
+        while not scheduled and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert len(scheduled) == 1
+        assert scheduled[0].interval == sdk_module.UNSOLICITED_QUIET_S
+        now[0] += sdk_module.UNSOLICITED_QUIET_S + 0.1
+        scheduled[0].callback()
+        assert sdk.woken_turn_active() is False
+        assert boundaries == [True]
+        assert sum("unsolicited burst closed" in record.message and "reason=quiet-interval" in record.message
+                   for record in caplog.records) == 1
+    finally:
+        sdk.close()
+
+
+def test_unsolicited_burst_logs_open_and_result_close_with_session_tag(caplog):
+    import logging
+    import time as _time
+    from tests.agent.claude_sdk_fakes import (
+        AssistantMessage, ResultMessage, ToolUseBlock, _make_session,
+    )
+
+    sdk, holder = _make_session(hermes_session_id="owner-log-id")
+    try:
+        sdk.ensure_started()
+        with caplog.at_level(logging.INFO):
+            holder["client"].feed(AssistantMessage(content=[
+                ToolUseBlock(id="tool-1", name="Agent", input={"description": "private"}),
+            ]))
+            deadline = _time.time() + 2
+            while not sdk.woken_turn_active() and _time.time() < deadline:
+                _time.sleep(0.01)
+            holder["client"].feed(ResultMessage(result="done", uuid="result-1"))
+            while sdk.woken_turn_active() and _time.time() < deadline:
+                _time.sleep(0.01)
+        lines = [record.message for record in caplog.records if "unsolicited" in record.message]
+        assert any("owner-log-id" in line and "opened" in line and "AssistantMessage" in line
+                   and "Agent" in line and "top_level=True" in line for line in lines)
+        assert any("owner-log-id" in line and "closed" in line and "result" in line for line in lines)
+        assert all("private" not in line for line in lines)
+    finally:
+        sdk.close()
+
+
 def test_late_result_after_quiet_boundary_cannot_answer_owner_turn():
     import time as _time
     from agent.transports import claude_agent_sdk_session as sdk_module
@@ -686,7 +884,7 @@ def test_late_result_after_quiet_boundary_cannot_answer_owner_turn():
         sdk.close()
 
 
-def test_host_prompt_folded_into_a_peer_turn_answers_the_host_turn():
+def test_host_prompt_folded_into_a_peer_turn_answers_the_host_turn(caplog):
     """Live 2026-09-24 (session ce3d96): a peer turn was running when the owner's prompt
     arrived. The CLI folded the queued prompt into that turn at a tool boundary (it replays
     the prompt mid-turn, proven with a live probe) and answered both with ONE ResultMessage
@@ -694,6 +892,7 @@ def test_host_prompt_folded_into_a_peer_turn_answers_the_host_turn():
     waiting out its 600 s timeout, the answer landed late as a background row, and the runtime
     was retired. After a mid-burst replay, the result is the host turn's answer."""
     import time as _time
+    import logging
 
     from tests.agent.claude_sdk_fakes import (
         AssistantMessage, ResultMessage, TextBlock, UserMessage, _make_session,
@@ -713,6 +912,7 @@ def test_host_prompt_folded_into_a_peer_turn_answers_the_host_turn():
         on_unsolicited_result=lambda texts, items=None: delivered.append((texts, items)),
     )
     try:
+        caplog.set_level(logging.INFO)
         session.ensure_started()
         peer_in = UserMessage(content="ping")
         peer_in.origin = peer_origin
@@ -731,6 +931,8 @@ def test_host_prompt_folded_into_a_peer_turn_answers_the_host_turn():
     assert turn.error is None
     assert turn.final_text == "answer to both"
     assert elapsed < 4.0, "the host turn must not wait out its timeout"
+    assert sum("unsolicited burst closed" in record.message and "reason=host-prompt" in record.message
+               for record in caplog.records) == 1
     assert all("answer to both" not in " ".join(texts) for texts, _items in delivered)
     # The peer message that started the folded turn still gets its card.
     assert any(item.get("kind") == "peer_in" and item.get("uuid") == "peer-in-1"

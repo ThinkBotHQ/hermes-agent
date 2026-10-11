@@ -501,6 +501,7 @@ export interface Translations {
     details: string
     copyDetail: string
     compressDeferredDone: string
+    ownerQueued: string
     copyDetailFailed: string
     backendOutOfDateTitle: string
     backendOutOfDateMessage: string
