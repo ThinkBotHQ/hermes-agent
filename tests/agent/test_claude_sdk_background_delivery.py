@@ -628,6 +628,7 @@ def test_quiet_sdk_boundary_drains_queued_owner_prompt_once(monkeypatch):
     from agent.transports import claude_agent_sdk_session as sdk_module
     from tests.agent.claude_sdk_fakes import AssistantMessage, TextBlock, _make_session
 
+    assert sdk_module.UNSOLICITED_QUIET_S == sdk_module._NATIVE_PEER_ADMIT_GRACE_SECONDS
     now = [100.0]
     sdk, holder = _make_session()
     sdk._unsolicited_clock = lambda: now[0]
@@ -817,6 +818,162 @@ def test_quiet_timer_closes_without_another_reader_message(monkeypatch, caplog):
         assert boundaries == [True]
         assert sum("unsolicited burst closed" in record.message and "reason=quiet-interval" in record.message
                    for record in caplog.records) == 1
+    finally:
+        sdk.close()
+
+
+def test_outstanding_top_level_tool_blocks_quiet_close_and_owner_drain(monkeypatch):
+    import time as _time
+    from agent.transports import claude_agent_sdk_session as sdk_module
+    from tests.agent.claude_sdk_fakes import (AssistantMessage, ResultMessage, ToolResultBlock,
+                                              ToolUseBlock, UserMessage, _make_session)
+
+    now = [100.0]
+    sdk, holder = _make_session()
+    sdk._unsolicited_clock = lambda: now[0]
+    server, gateway, fired = _gateway_owner_for_sdk(monkeypatch, sdk)
+    try:
+        sdk.ensure_started()
+        holder["client"].feed(AssistantMessage(content=[ToolUseBlock("tool-1", "Read", {})]))
+        deadline = _time.time() + 2
+        while not sdk.woken_turn_active() and _time.time() < deadline:
+            _time.sleep(0.01)
+        response = server.handle_request({"id": "owner", "method": "prompt.submit",
+                                          "params": {"session_id": "sdk-owner-boundary", "text": "owner next"}})
+        assert response["result"]["status"] == "queued"
+        now[0] += 600
+        sdk._expire_unsolicited_burst()
+        assert sdk.woken_turn_active()
+        assert gateway["queued_prompt"]["text"] == "owner next"
+        assert fired == []
+        holder["client"].feed(UserMessage(content=[ToolResultBlock("tool-1", "done")]),
+                              ResultMessage(result="background done", uuid="background-end"))
+        while not fired and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert fired == ["owner next"]
+    finally:
+        sdk.close()
+
+
+@pytest.mark.parametrize("replay", [True, False])
+def test_quiet_closed_turn_without_echo_answers_owner_once(replay):
+    import time as _time
+    from agent.transports import claude_agent_sdk_session as sdk_module
+    from tests.agent.claude_sdk_fakes import AssistantMessage, ResultMessage, TextBlock, _make_session
+
+    now = [100.0]
+    background = []
+    sdk, holder = _make_session(on_unsolicited_result=lambda texts, items=None: background.append(texts))
+    sdk._unsolicited_clock = lambda: now[0]
+    try:
+        sdk.ensure_started()
+        client = holder["client"]
+        client.feed(AssistantMessage(content=[TextBlock("old partial")]))
+        deadline = _time.time() + 2
+        while not sdk.woken_turn_active() and _time.time() < deadline:
+            _time.sleep(0.01)
+        now[0] += sdk_module.UNSOLICITED_QUIET_S + 1
+        sdk._expire_unsolicited_burst()
+        sdk._replay_user_messages = replay
+
+        async def no_echo(_prompt):
+            client.feed(AssistantMessage(content=[TextBlock("owner answer")]),
+                        ResultMessage(result="owner answer", uuid="owner-end"))
+        client.query = no_echo
+        turn = sdk.run_turn("owner prompt", turn_timeout=1.0)
+        assert turn.final_text == "owner answer"
+        assert sum("owner answer" in " ".join(texts) for texts in background) == 0
+    finally:
+        sdk.close()
+
+
+def test_late_old_result_ends_quiet_guard_before_owner_echo():
+    import asyncio
+    import time as _time
+    from agent.transports import claude_agent_sdk_session as sdk_module
+    from tests.agent.claude_sdk_fakes import AssistantMessage, ResultMessage, TextBlock, UserMessage, _make_session
+
+    now = [100.0]
+    background = []
+    guard_after_old = []
+    sdk, holder = _make_session(on_unsolicited_result=lambda texts, items=None: background.append(texts))
+    sdk._unsolicited_clock = lambda: now[0]
+    try:
+        sdk.ensure_started()
+        client = holder["client"]
+        client.feed(AssistantMessage(content=[TextBlock("old partial")]))
+        deadline = _time.time() + 2
+        while not sdk.woken_turn_active() and _time.time() < deadline:
+            _time.sleep(0.01)
+        now[0] += sdk_module.UNSOLICITED_QUIET_S + 1
+        sdk._expire_unsolicited_burst()
+
+        async def old_then_owner(_prompt):
+            client.feed(ResultMessage(result="old answer", uuid="old-end"))
+            for _ in range(100):
+                if background:
+                    break
+                await asyncio.sleep(0.005)
+            guard_after_old.append(sdk._unsolicited_quiet_expired)
+            client.feed(UserMessage(content="owner prompt"),
+                        AssistantMessage(content=[TextBlock("owner answer")]),
+                        ResultMessage(result="owner answer", uuid="owner-end"))
+        client.query = old_then_owner
+        turn = sdk.run_turn("owner prompt", turn_timeout=1.0)
+        assert turn.final_text == "owner answer"
+        assert guard_after_old == [False]
+        assert sum("old answer" in " ".join(texts) for texts in background) == 1
+        assert all("old answer" not in str(m) for m in turn.projected_messages)
+    finally:
+        sdk.close()
+
+
+def test_quiet_closed_burst_can_fold_owner_prompt():
+    import time as _time
+    from agent.transports import claude_agent_sdk_session as sdk_module
+    from tests.agent.claude_sdk_fakes import AssistantMessage, ResultMessage, TextBlock, _make_session
+
+    now = [100.0]
+    peer = {"kind": "peer", "from": "peer-id", "body": "ping"}
+    folded = ResultMessage(result="folded answer", uuid="folded-end")
+    folded.origin = peer
+    background = []
+    sdk, holder = _make_session(script=[AssistantMessage(content=[TextBlock("folded answer")]), folded],
+                                on_unsolicited_result=lambda texts, items=None: background.append(texts))
+    sdk._unsolicited_clock = lambda: now[0]
+    try:
+        sdk.ensure_started()
+        holder["client"].feed(AssistantMessage(content=[TextBlock("old partial")]))
+        deadline = _time.time() + 2
+        while not sdk.woken_turn_active() and _time.time() < deadline:
+            _time.sleep(0.01)
+        now[0] += sdk_module.UNSOLICITED_QUIET_S + 1
+        sdk._expire_unsolicited_burst()
+        turn = sdk.run_turn("owner prompt", turn_timeout=1.0)
+        assert turn.final_text == "folded answer"
+        assert sum("folded answer" in " ".join(texts) for texts in background) == 0
+    finally:
+        sdk.close()
+
+
+def test_stream_end_keeps_deferred_rename_for_next_cli():
+    import time as _time
+    from tests.agent.claude_sdk_fakes import _EOS, AssistantMessage, TextBlock, _make_session
+
+    sdk, holder = _make_session()
+    try:
+        sdk.ensure_started()
+        holder["client"].feed(AssistantMessage(content=[TextBlock("background")]))
+        deadline = _time.time() + 2
+        while not sdk.woken_turn_active() and _time.time() < deadline:
+            _time.sleep(0.01)
+        sdk._deferred_rename = "hermes:next"
+        holder["client"].feed(_EOS)
+        while sdk._stream_ended is None and _time.time() < deadline:
+            _time.sleep(0.01)
+        assert sdk._stream_ended is not None
+        assert sdk._deferred_rename == "hermes:next"
+        assert sdk.build_option_fields()["extra_args"]["name"] == "hermes:next"
     finally:
         sdk.close()
 

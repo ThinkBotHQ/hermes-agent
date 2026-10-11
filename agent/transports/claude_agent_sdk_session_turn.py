@@ -1699,6 +1699,25 @@ class ClaudeSdkTurnMixin:
         message_task = None
         claim_task = None
         pending_turn_claims = []
+        def fold_host_prompt(message: Any) -> None:
+            # The replayed prompt can be folded into an injected turn even after
+            # the quiet boundary released its owner hold.
+            self._host_prompt_folded = True
+            self._close_unsolicited_burst("host-prompt")
+            self._unsolicited_quiet_expired = False
+            self._native_peer_in_flight = False
+            self._native_peer_msg_id = None
+            self._native_peer_seen = False
+            self._deliver_prefold_peer_items()
+            if self._unsolicited_text or self._unsolicited_items:
+                logger.warning(
+                    "claude-agent-sdk: host prompt replayed mid-burst; discarding "
+                    "%d stale unsolicited text(s) buffered before it (a folded "
+                    "injected turn, or a burst whose result never arrived)",
+                    len(self._unsolicited_text),
+                )
+            _clear_unsolicited_projection(self)
+            inbox.put_nowait(message)
         try:
             iterator = self._client.receive_messages().__aiter__()
             message_task = asyncio.ensure_future(iterator.__anext__())
@@ -1737,41 +1756,36 @@ class ClaudeSdkTurnMixin:
                             # peer origin and all, now answers the host turn.
                             # (cntrl carry) Its pre-fold partial text must never
                             # attach to a later unrelated result.
-                            self._host_prompt_folded = True
-                            self._close_unsolicited_burst("host-prompt")
-                            self._native_peer_in_flight = False
-                            self._native_peer_msg_id = None
-                            self._native_peer_seen = False
-                            self._deliver_prefold_peer_items()
-                            if self._unsolicited_text or self._unsolicited_items:
-                                logger.warning(
-                                    "claude-agent-sdk: host prompt replayed mid-burst; discarding "
-                                    "%d stale unsolicited text(s) buffered before it (a folded "
-                                    "injected turn, or a burst whose result never arrived)",
-                                    len(self._unsolicited_text),
-                                )
-                            _clear_unsolicited_projection(self)
-                            inbox.put_nowait(message)
+                            fold_host_prompt(message)
                         else:
                             if (getattr(message, "parent_tool_use_id", None) is None
                                     and type(message).__name__ != "ResultMessage"):
+                                self._note_unsolicited_tools(message)
                                 self._note_unsolicited_activity()
                             self._handle_unsolicited(message)
                             if type(message).__name__ == "ResultMessage":
                                 self._close_unsolicited_burst("result")
                                 self._apply_deferred_rename()
                                 self._notify_idle_boundary()
-                    elif inbox is not None and self._unsolicited_quiet_expired:
+                    elif (inbox is not None and self._unsolicited_quiet_expired
+                          and self._replay_user_messages):
                         # A terminal result can arrive after the quiet boundary. It still
                         # belongs to the old burst until the CLI echoes this host prompt.
                         if _is_own_prompt_echo(message):
+                            fold_host_prompt(message)
+                        elif type(message).__name__ == "ResultMessage":
+                            self._handle_unsolicited(message)
+                            self._unsolicited_quiet_expired = False
+                            self._notify_idle_boundary()
+                        elif (type(message).__name__ == "AssistantMessage"
+                              and getattr(message, "parent_tool_use_id", None) is None):
+                            # A missing replay echo cannot strand a claimed owner turn.
                             self._unsolicited_quiet_expired = False
                             inbox.put_nowait(message)
                         else:
                             self._handle_unsolicited(message)
-                            if type(message).__name__ == "ResultMessage":
-                                self._notify_idle_boundary()
                     elif inbox is not None:
+                        self._unsolicited_quiet_expired = False
                         inbox.put_nowait(message)
                     elif getattr(self, "_resume_backlog", None) is not None:
                         # D62 L2: the CLI's own re-run of the interrupted turn
@@ -1799,6 +1813,7 @@ class ClaudeSdkTurnMixin:
                             self._unsolicited_quiet_expired = False
                         if (self._unsolicited_burst_open and getattr(message, "parent_tool_use_id", None) is None
                                 and type(message).__name__ != "ResultMessage"):
+                            self._note_unsolicited_tools(message)
                             self._note_unsolicited_activity()
                         self._handle_unsolicited(message)
                         if type(message).__name__ == "ResultMessage":
@@ -1849,6 +1864,7 @@ class ClaudeSdkTurnMixin:
                         )
                         continue
                     self._host_prompt_folded = False
+                    self._unsolicited_quiet_expired = False
                     self._turn_inbox = None
                     claim_ack.set_result(None)
                     if pending_turn_claims:
@@ -1931,9 +1947,10 @@ class ClaudeSdkTurnMixin:
             self._turn_claim_ack = None
             self._rename_claim_requested = False
             self._pending_rename_ack = None
-            self._deferred_rename = None
             self._resume_backlog = None
             self._turn_claims = None
+        # /rename requires the live CLI, so leave a deferred name parked for
+        # the next session start rather than consuming it on this dead stream.
         self._notify_idle_boundary()
 
     def _ensure_unsolicited_header_emitted(self) -> None:

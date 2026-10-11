@@ -108,7 +108,7 @@ _RENAME_ACK_TIMEOUT_SECONDS = 10.0
 _NATIVE_PEER_QUERY_TIMEOUT_SECONDS = 5.0
 _NATIVE_PEER_ADMIT_GRACE_SECONDS = 120.0
 _NATIVE_PEER_WRITE_MAX_SECONDS = 60.0
-UNSOLICITED_QUIET_S = 20.0
+UNSOLICITED_QUIET_S = 120.0
 
 
 class _RenameClaimDeferred(RuntimeError):
@@ -438,7 +438,9 @@ class ClaudeAgentSdkSession(
         # after a host turn claims the stream (see _reader_loop).
         self._unsolicited_burst_open = False
         self._unsolicited_quiet_expired = False
+        self._replay_user_messages = True
         self._unsolicited_last_top_level_at: Optional[float] = None
+        self._unsolicited_outstanding_tools: set[str] = set()
         self._unsolicited_quiet_timer: Optional[threading.Timer] = None
         self._unsolicited_clock = time.monotonic
         self._native_peer_in_flight = False
@@ -1410,12 +1412,29 @@ class ClaudeAgentSdkSession(
                 self._unsolicited_quiet_timer = timer
                 timer.start()
 
+    def _note_unsolicited_tools(self, message: Any) -> None:
+        """Track top-level tool calls until their matching top-level results arrive."""
+        if getattr(message, "parent_tool_use_id", None) is not None:
+            return
+        name = type(message).__name__
+        if name == "AssistantMessage":
+            ids = {str(block.id) for block in (getattr(message, "content", None) or [])
+                   if type(block).__name__ == "ToolUseBlock" and getattr(block, "id", None)}
+            with self._turn_callback_lock:
+                self._unsolicited_outstanding_tools.update(ids)
+        elif name == "UserMessage":
+            ids = {str(block.tool_use_id) for block in (getattr(message, "content", None) or [])
+                   if type(block).__name__ == "ToolResultBlock" and getattr(block, "tool_use_id", None)}
+            with self._turn_callback_lock:
+                self._unsolicited_outstanding_tools.difference_update(ids)
+
     def _close_unsolicited_burst(self, reason: str, *, quiet_expired: bool = False) -> None:
         with self._turn_callback_lock:
             was_open = self._unsolicited_burst_open
             self._unsolicited_burst_open = False
             self._unsolicited_quiet_expired = quiet_expired
             self._unsolicited_last_top_level_at = None
+            self._unsolicited_outstanding_tools.clear()
             timer = self._unsolicited_quiet_timer
             self._unsolicited_quiet_timer = None
             if timer is not None:
@@ -1431,8 +1450,10 @@ class ClaudeAgentSdkSession(
             if not self._unsolicited_burst_open or since is None or self._closed:
                 return
             remaining = UNSOLICITED_QUIET_S - (self._unsolicited_clock() - since)
-            if remaining > 0:
-                timer = threading.Timer(remaining, self._expire_unsolicited_burst)
+            if remaining > 0 or self._unsolicited_outstanding_tools:
+                # Tool execution may be quiet for far longer than the interval.
+                timer = threading.Timer(remaining if remaining > 0 else UNSOLICITED_QUIET_S,
+                                        self._expire_unsolicited_burst)
                 timer.daemon = True
                 self._unsolicited_quiet_timer = timer
                 timer.start()
@@ -1909,8 +1930,9 @@ class ClaudeAgentSdkSession(
         # Name the spawned session so peers can find and message it
         # (ListAgents/SendMessage) — the host-router seam.
         extra = dict(fields.get("extra_args") or {})
-        if self._session_name and not getattr(self, "_peer_name_refused", False):
-            extra.setdefault("name", self._session_name)
+        next_name = self._deferred_rename or self._session_name
+        if next_name and not getattr(self, "_peer_name_refused", False):
+            extra.setdefault("name", next_name)
         # Injected turns (peer SendMessage deliveries, task notifications,
         # scheduled prompts) only appear on the stream as origin-tagged
         # UserMessages when the CLI replays user messages. Without this the
@@ -1932,6 +1954,7 @@ class ClaudeAgentSdkSession(
 
     def _build_client(self) -> Any:
         fields = self.build_option_fields()
+        self._replay_user_messages = "replay-user-messages" in fields.get("extra_args", {})
         if self._client_factory is not None:
             return self._client_factory(options=fields)
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient

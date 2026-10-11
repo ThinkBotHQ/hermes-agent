@@ -118,6 +118,40 @@ def test_idle_owner_prompt_dispatches_immediately(harness) -> None:
     assert harness.fired == [("owner reply", False)]
 
 
+@pytest.mark.parametrize("raises", [True, False])
+def test_failed_owner_drain_restores_front_and_later_boundary_delivers_once(
+        harness, monkeypatch, capsys, raises) -> None:
+    sdk = _WokenSdk()
+    sdk.active = False
+    session = _session(sdk)
+    server._sessions[SID] = session
+    harness.sdk = sdk
+    with session["history_lock"]:
+        server._enqueue_prompt(session, "owner reply", None)
+        server._enqueue_prompt(session, "later peer", None, display_kind="peer_in")
+
+    calls = []
+    def fail_start(_rid, _sid, _session, text, **_kw):
+        calls.append(text)
+        if raises:
+            raise RuntimeError("CLI could not start")
+        return False
+    monkeypatch.setattr(server, "_run_prompt_submit", fail_start)
+    assert server._drain_queued_prompt("r", SID, session)
+    assert calls == ["owner reply"]
+    assert session["queued_prompt"]["text"] == "owner reply"
+    assert session["queued_prompts"][0]["text"] == "later peer"
+    assert len(_errors(harness)) == 1
+    assert capsys.readouterr().err.count("CLI could not start") == int(raises)
+
+    monkeypatch.setattr(server, "_run_prompt_submit",
+                        lambda _rid, _sid, _session, text, **_kw: calls.append(text))
+    assert server._drain_queued_prompt("r", SID, session)
+    assert calls == ["owner reply", "owner reply"]
+    assert session["queued_prompt"]["text"] == "later peer"
+    assert len(_errors(harness)) == 1
+
+
 def test_owner_prompt_remains_queued_when_sdk_turn_has_no_result(harness) -> None:
     sdk = _WokenSdk(ends_on_interrupt=None)
     session = _session(sdk)
