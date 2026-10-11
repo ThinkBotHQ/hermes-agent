@@ -502,33 +502,24 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     # The compute-host frame has no author field, so only the inline runner receives it.
     author_kwargs = {"turn_author": queued["turn_author"]} if queued.get("turn_author") else {}
     dispatch_failed = False
-    dispatch_error = None
     try:
         if not use_compute_host:
-            if _run_prompt_submit(rid, sid, session, queued["text"], **kwargs, **author_kwargs) is False:
-                _notif_release_turn(session)
-                dispatch_failed = True
-                dispatch_error = "Queued prompt could not start; it remains queued."
+            _run_prompt_submit(rid, sid, session, queued["text"], **kwargs, **author_kwargs)
         elif (resp := _submit_prompt_to_compute_host(rid, sid, session, queued["text"], **kwargs)).get("error"):
             with session["history_lock"]:
                 session["running"] = False
                 _clear_inflight_turn(session)
+            _emit("error", sid, {"message": str((resp.get("error") or {}).get("message") or "queued prompt failed")})
             dispatch_failed = True
-            dispatch_error = str((resp.get("error") or {}).get("message") or "queued prompt failed")
     except Exception as exc:
         _notif_log_failure("queued prompt dispatch failed", exc)
         _notif_release_turn(session)
         dispatch_failed = True
-        dispatch_error = "Queued prompt could not start; it remains queued."
     if dispatch_failed:
         with session["history_lock"]:
-            # Keep the failed owner at the front; another boundary may retry it.
-            _ac_set_queue(session, [queued, *([session["queued_prompt"]] if session.get("queued_prompt") else []),
-                                    *(session.get("queued_prompts") or [])])
-            if _ac_is_owner_entry(queued):
-                from tui_gateway.owner_hold import note_owner_queued
-                note_owner_queued(session)
-        _emit("error", sid, {"message": dispatch_error})
+            drain_next = bool(session.get("queued_prompt")) and not session.get("_turn_cancel_requested")
+        if drain_next:
+            _drain_queued_prompt(rid, sid, session)
     return True
 
 

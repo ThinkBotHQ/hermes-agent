@@ -13,15 +13,16 @@ Both used to be unbounded. Live 2026-09-30 (session 20260924_200208_c68a80): an 
 "owner input pending or Stop hold active" for 44 and 41 minutes. The hold now releases:
 
 * on delivery (the owner entry is drained, or the owner's own turn claims the session);
-* when the RPC returns and its ``_owner_submit_waiting`` count drops;
+* on failure (the RPC returns and its ``_owner_submit_waiting`` count drops; a Stop that discards a queued
+  owner message reports it to the client as failed, never silently);
 * when the turn ends (the post-turn drain delivers the owner entry first);
 * after ``TIMEOUT_S`` at the latest for the Stop hold and for an owner RPC that never returns, with a
   WARNING log line.
 
 A QUEUED owner message is different: while it is queued, peers are never admitted ahead of it, expired or
 not (R2-P1-3). Its bound only changes HOW it is delivered: the backstop timer claims the session for it
-at the next boundary (atomically, under ``history_lock``, before any peer drain). Delivery resets its
-clock, so a fresh owner message gets a fresh bound.
+at the next boundary (atomically, under ``history_lock``, before any peer drain). Every queue discard
+(Stop, /new, delivery) resets its clock, so a fresh owner message gets a fresh bound.
 
 Elapsed time is never a turn boundary (R2-P1-4). Behind an unclaimed CLI turn (a woken/injected burst) the
 owner message is dispatched only after a real boundary. When the bound passes, the backstop
@@ -160,7 +161,7 @@ def owner_entry_delivered(session: dict) -> None:
 
 
 def owner_queue_discarded(session: dict) -> None:
-    """A queue replacement discarded its owner entries: its hold clock goes too.
+    """The queued owner input was thrown away (Stop, /new): its hold clock goes too.
     Caller holds ``history_lock``."""
     owner_entry_delivered(session)
 

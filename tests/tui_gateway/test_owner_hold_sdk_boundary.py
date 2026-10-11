@@ -1,11 +1,10 @@
 """R2-P1-4: elapsed time is never a turn boundary for the SDK stream.
 
 An owner message queued behind an unclaimed CLI turn (a woken/injected burst) is dispatched only after
-that turn's acknowledged terminal result. When the bound passes, the backstop does explicit transport
-recovery (interrupt, then wait a bounded time for the terminal result). If the result still does not
-come, the owner submission is VISIBLY failed ("Not delivered ... Send it again") and the hold releases;
-the prompt never reaches query() on the still-active stream (that would fold it into the injected turn
-mid-loop, reader at agent/transports/claude_agent_sdk_session_turn.py ``_is_own_prompt_echo``).
+a real boundary. When the bound passes, the backstop nudges the transport and reports the queued status
+once. The hold keeps the message until delivery or an explicit Stop discards it; the prompt never reaches
+query() on the still-active stream (that would fold it into the injected turn mid-loop, reader at
+agent/transports/claude_agent_sdk_session_turn.py ``_is_own_prompt_echo``).
 """
 
 from __future__ import annotations
@@ -116,40 +115,6 @@ def test_idle_owner_prompt_dispatches_immediately(harness) -> None:
                                       "params": {"session_id": SID, "text": "owner reply"}})
     assert response["result"]["status"] == "streaming"
     assert harness.fired == [("owner reply", False)]
-
-
-@pytest.mark.parametrize("raises", [True, False])
-def test_failed_owner_drain_restores_front_and_later_boundary_delivers_once(
-        harness, monkeypatch, capsys, raises) -> None:
-    sdk = _WokenSdk()
-    sdk.active = False
-    session = _session(sdk)
-    server._sessions[SID] = session
-    harness.sdk = sdk
-    with session["history_lock"]:
-        server._enqueue_prompt(session, "owner reply", None)
-        server._enqueue_prompt(session, "later peer", None, display_kind="peer_in")
-
-    calls = []
-    def fail_start(_rid, _sid, _session, text, **_kw):
-        calls.append(text)
-        if raises:
-            raise RuntimeError("CLI could not start")
-        return False
-    monkeypatch.setattr(server, "_run_prompt_submit", fail_start)
-    assert server._drain_queued_prompt("r", SID, session)
-    assert calls == ["owner reply"]
-    assert session["queued_prompt"]["text"] == "owner reply"
-    assert session["queued_prompts"][0]["text"] == "later peer"
-    assert len(_errors(harness)) == 1
-    assert capsys.readouterr().err.count("CLI could not start") == int(raises)
-
-    monkeypatch.setattr(server, "_run_prompt_submit",
-                        lambda _rid, _sid, _session, text, **_kw: calls.append(text))
-    assert server._drain_queued_prompt("r", SID, session)
-    assert calls == ["owner reply", "owner reply"]
-    assert session["queued_prompt"]["text"] == "later peer"
-    assert len(_errors(harness)) == 1
 
 
 def test_owner_prompt_remains_queued_when_sdk_turn_has_no_result(harness) -> None:
