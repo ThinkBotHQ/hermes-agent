@@ -1441,3 +1441,513 @@ def test_quiet_cli_after_a_result_finishes_the_turn_with_one_warning(monkeypatch
     finally:
         session.close()
         thread.join(3.0)
+
+
+# --- review round 2: unanswered steers at release, the quiet limit, replays that are not a steer's ---
+
+
+def _held_steer_session(monkeypatch, on_delta_steers, steers=(), **kwargs):
+    """A host turn whose CLI turn has ended ("original answer") with ``on_delta_steers`` unanswered."""
+    from agent.transports import claude_agent_sdk_session_turn as turn_module
+
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    monkeypatch.setattr(turn_module, "_STEER_WAIT_POLL_SECONDS", 0.01, raising=False)
+    session, holder, calls = _scripted_session(
+        first=[echo("initial", "prompt-echo", origin=None), delta("typing"), say("original answer"),
+               result("original answer", "turn-result")],
+        steers=list(steers),
+        on_delta_steers=list(on_delta_steers),
+        **kwargs,
+    )
+    clock = session._steer_wait_clock = _SteerWaitClock()
+    return session, holder, calls, clock
+
+
+def _await_held_result(calls, clock, pending):
+    """Block until the turn's own result was read with ``pending`` steers still unanswered."""
+    import time
+
+    deadline = time.monotonic() + 5.0
+    while not calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert [(text, left) for text, _rows, _index, left in calls] == [(None, pending)]
+    clock.waiting.wait(1.0)  # the wait reads its start time before a test moves the clock
+
+
+def _wait_until(condition, timeout=3.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return bool(condition())
+
+
+def _persisted_rows(calls, turn):
+    """What the runtime writes for the turn: every settled boundary, then the turn-end flush."""
+    from agent.claude_sdk_runtime_continuity import _persist_turn
+
+    rows = _transcript(calls)
+    _persist_turn(types.SimpleNamespace(_session_db=None), types.SimpleNamespace(
+        turn=turn, messages=rows, failover_reason=None, turn_session_cwd=None,
+    ))
+    return rows
+
+
+def _assert_no_adjacent_user_rows(rows):
+    roles = [row["role"] for row in rows]
+    assert not any(a == b == "user" for a, b in zip(roles, roles[1:])), _shape(rows)
+
+
+def _steer_warnings(caplog):
+    import logging
+
+    return [r for r in caplog.records if r.levelno == logging.WARNING and "steer" in r.getMessage()]
+
+
+def test_stop_release_writes_two_unanswered_steers_as_one_user_row(monkeypatch):
+    """F1: Stop releases a turn with two steers unanswered, both typed at the same point. Their text
+    is ONE user row; two user rows in a row never reach the transcript."""
+    session, holder, calls, clock = _held_steer_session(monkeypatch, ["x", "y"])
+    thread, box = _turn_in_thread(session)
+    try:
+        _await_held_result(calls, clock, 2)
+        session.request_interrupt()
+        clock.now = 5.0
+        thread.join(3.0)
+        assert not thread.is_alive(), "Stop did not release the turn"
+        turn = box["turn"]
+        assert turn.interrupted is True and turn.error is None
+        rows = _persisted_rows(calls, turn)
+        _assert_no_adjacent_user_rows(rows)
+        assert _shape(rows) == [("assistant", "original answer"), ("user", "x\ny")]
+        assert [m["content"] for m in turn.projected_messages if m["role"] == "user"] == ["x\ny"]
+        assert session._pending_steer_marks == [] and session._pending_steer_results == 0
+    finally:
+        session.close()
+        thread.join(3.0)
+
+
+def test_quiet_release_writes_two_unanswered_steers_as_one_user_row(monkeypatch):
+    """F1: the same two unanswered steers when the safety net ends the turn."""
+    session, holder, calls, clock = _held_steer_session(monkeypatch, ["x", "y"])
+    thread, box = _turn_in_thread(session)
+    try:
+        _await_held_result(calls, clock, 2)
+        clock.now = 61.0
+        thread.join(3.0)
+        assert not thread.is_alive(), "the safety net did not finish the turn"
+        turn = box["turn"]
+        assert turn.interrupted is False and turn.error is None
+        assert turn.final_text == "original answer"
+        rows = _persisted_rows(calls, turn)
+        _assert_no_adjacent_user_rows(rows)
+        assert _shape(rows) == [("assistant", "original answer"), ("user", "x\ny")]
+        assert [m["content"] for m in turn.projected_messages if m["role"] == "user"] == ["x\ny"]
+    finally:
+        session.close()
+        thread.join(3.0)
+
+
+def test_one_unanswered_steer_keeps_its_own_unchanged_row(monkeypatch):
+    """F1: a single unanswered steer is written exactly as before on both releases."""
+    for release in ("stop", "quiet"):
+        session, holder, calls, clock = _held_steer_session(monkeypatch, ["only one"])
+        thread, box = _turn_in_thread(session)
+        try:
+            _await_held_result(calls, clock, 1)
+            if release == "stop":
+                session.request_interrupt()
+                clock.now = 5.0
+            else:
+                clock.now = 61.0
+            thread.join(3.0)
+            assert not thread.is_alive(), release
+            turn = box["turn"]
+            steer_rows = [m for m in turn.projected_messages if m["role"] == "user"]
+            assert len(steer_rows) == 1, release
+            assert set(steer_rows[0]) == {"role", "content", "timestamp"}
+            assert steer_rows[0]["content"] == "only one"
+            assert isinstance(steer_rows[0]["timestamp"], float)
+            assert _shape(_persisted_rows(calls, turn)) == [
+                ("assistant", "original answer"), ("user", "only one"),
+            ], release
+        finally:
+            session.close()
+            thread.join(3.0)
+
+
+def _unsettled_stream_session(first, steer_on_delta):
+    """A CLI whose stream ends with every steer unanswered; ``steer_on_delta[n]`` are sent on delta n."""
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+
+    AssistantMessage, TextBlock, _EOS, _FakeClient, result, delta = _steer_order_fakes()
+
+    class Client(_FakeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                self.queried.append(prompt)
+                self._pending.extend(first)
+                return
+            self.queried.append([message async for message in prompt])
+            if len(self.queried) - 1 == sum(len(batch) for batch in steer_on_delta):
+                self._pending.append(_EOS)  # the stream ends before any steer is answered
+
+    seen = 0
+
+    def on_delta(_text):
+        nonlocal seen
+        batch = steer_on_delta[seen] if seen < len(steer_on_delta) else ()
+        seen += 1
+        for text in batch:
+            assert session.steer(text) is True
+
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp", model="claude-opus-4-8", client_factory=lambda options=None: Client(options=options),
+        on_stream_delta=on_delta,
+    )
+    return session
+
+
+def test_stream_end_writes_two_unanswered_steers_typed_together_as_one_row():
+    """F1: the error exit takes the same cleanup. Two steers typed at one point, never answered: one row."""
+    AssistantMessage, TextBlock, _EOS, _FakeClient, result, delta = _steer_order_fakes()
+    session = _unsettled_stream_session(
+        first=[AssistantMessage(content=[TextBlock("pre-steer output")]), delta("typing"),
+               AssistantMessage(content=[TextBlock("more output")])],
+        steer_on_delta=[["x", "y"]],
+    )
+    try:
+        turn = session.run_turn("initial")
+    finally:
+        session.close()
+
+    rows = list(turn.projected_messages)
+    _assert_no_adjacent_user_rows(rows)
+    assert _shape(rows) == [
+        ("assistant", "pre-steer output"), ("user", "x\ny"), ("assistant", "more output"),
+    ]
+    assert session._pending_steer_marks == []
+
+
+def test_unanswered_steers_typed_at_different_points_keep_their_own_rows():
+    """F1: unanswered steers with assistant output between them stay separate rows, each where typed."""
+    AssistantMessage, TextBlock, _EOS, _FakeClient, result, delta = _steer_order_fakes()
+    session = _unsettled_stream_session(
+        first=[AssistantMessage(content=[TextBlock("one")]), delta("a"),
+               AssistantMessage(content=[TextBlock("two")]), delta("b"),
+               AssistantMessage(content=[TextBlock("three")])],
+        steer_on_delta=[["x"], ["y"]],
+    )
+    try:
+        turn = session.run_turn("initial")
+    finally:
+        session.close()
+
+    rows = list(turn.projected_messages)
+    _assert_no_adjacent_user_rows(rows)
+    assert _shape(rows) == [
+        ("assistant", "one"), ("user", "x"), ("assistant", "two"), ("user", "y"), ("assistant", "three"),
+    ]
+
+
+def test_steer_written_after_the_held_result_keeps_the_turn_open_past_the_quiet_limit(monkeypatch, caplog):
+    """F2: the turn waits only on a steer's result, then a second steer IS written. The CLI owes a turn
+    for it, so the quiet limit no longer applies: nothing is committed, and the steers' own results
+    finish the turn."""
+    import logging
+
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    delivered = []
+    session, holder, calls, clock = _held_steer_session(
+        monkeypatch, ["first"], on_unsolicited_result=lambda texts, items=None: delivered.append(texts),
+    )
+    thread, box = _turn_in_thread(session)
+    try:
+        with caplog.at_level(logging.WARNING, logger="agent.transports.claude_agent_sdk_session"):
+            _await_held_result(calls, clock, 1)
+            clock.now = 55.0
+            assert session.steer("second") is True
+            assert _wait_until(lambda: len(holder["client"].queried) == 3), "the second steer was not written"
+            clock.now = 120.0
+            thread.join(0.5)
+            assert thread.is_alive(), "the quiet limit fired although a steer was written after the result"
+            assert session._terminal_result_committed is False
+            assert session._turn_inbox is not None and session._pending_steer_results == 2
+            assert _steer_warnings(caplog) == []
+            holder["client"].feed(
+                echo("first", "echo-first"), say("answer first"),
+                result("answer first", "first-result", {"kind": "human"}),
+                echo("second", "echo-second"), say("answer second"),
+                result("answer second", "second-result", {"kind": "human"}),
+            )
+            thread.join(3.0)
+            assert not thread.is_alive()
+        turn = box["turn"]
+        assert turn.error is None and turn.interrupted is False
+        assert turn.final_text == "answer second"
+        assert turn.turn_id == "second-result"
+        assert [(text, left) for text, _rows, _index, left in calls] == [(None, 1), ("first", 1), ("second", 0)]
+        rows = _persisted_rows(calls, turn)
+        _assert_no_adjacent_user_rows(rows)
+        assert _shape(rows) == [
+            ("assistant", "original answer"), ("user", "first"), ("assistant", "answer first"),
+            ("user", "second"), ("assistant", "answer second"),
+        ]
+        assert delivered == [] and session._unsolicited_results == 0
+        assert _steer_warnings(caplog) == []
+    finally:
+        session.close()
+        thread.join(3.0)
+
+
+def _fail_next_steer_write(session, holder, text):
+    """Admit a steer whose write to the CLI fails: the reservation is rolled back, the sequence is not."""
+    async def failing_query(_prompt):
+        raise RuntimeError("stdin closed")
+
+    working_query = holder["client"].query
+    holder["client"].query = failing_query
+    try:
+        before = session._steer_write_seq
+        assert session.steer(text) is True
+        assert _wait_until(lambda: session._pending_steer_results == 1), "the failed write was not rolled back"
+        assert session._steer_write_seq == before + 1
+        assert [mark["text"] for mark in session._pending_steer_marks] == ["first"]
+    finally:
+        holder["client"].query = working_query
+
+
+def test_rolled_back_steer_write_after_the_held_result_keeps_the_quiet_limit(monkeypatch, caplog):
+    """F2: a write that FAILED after the result handed the CLI nothing, so the safety net still applies."""
+    import logging
+
+    session, holder, calls, clock = _held_steer_session(monkeypatch, ["first"])
+    thread, box = _turn_in_thread(session)
+    try:
+        with caplog.at_level(logging.WARNING, logger="agent.transports.claude_agent_sdk_session"):
+            _await_held_result(calls, clock, 1)
+            clock.now = 55.0
+            _fail_next_steer_write(session, holder, "second")
+            clock.now = 59.0
+            thread.join(0.3)
+            assert thread.is_alive()
+            clock.now = 61.0
+            thread.join(3.0)
+            assert not thread.is_alive(), "a rolled-back write must not disable the safety net"
+        turn = box["turn"]
+        assert turn.error is None and turn.interrupted is False
+        assert turn.final_text == "original answer"
+        assert len(_steer_warnings(caplog)) == 1
+        assert [m["content"] for m in turn.projected_messages if m["role"] == "user"] == ["first"]
+    finally:
+        session.close()
+        thread.join(3.0)
+
+
+def test_stop_still_releases_after_a_rolled_back_steer_write(monkeypatch):
+    """F2: the same failed write must not make Stop believe the CLI was handed a turn."""
+    session, holder, calls, clock = _held_steer_session(monkeypatch, ["first"])
+    thread, box = _turn_in_thread(session)
+    try:
+        _await_held_result(calls, clock, 1)
+        _fail_next_steer_write(session, holder, "second")
+        session.request_interrupt()
+        clock.now = 5.0
+        thread.join(3.0)
+        assert not thread.is_alive(), "Stop did not release after a write that never reached the CLI"
+        turn = box["turn"]
+        assert turn.interrupted is True and turn.error is None
+    finally:
+        session.close()
+        thread.join(3.0)
+
+
+def test_duplicate_prompt_replay_is_not_the_echo_of_a_steer_with_the_same_text():
+    """F3: the CLI replays the host prompt twice (same uuid). A steer with the same words is still
+    queued: the second replay must not mark it consumed, or the prompt's result would settle it."""
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    session, holder, calls = _scripted_session(
+        first=[delta("typing"), echo("continue", "prompt-echo"), echo("continue", "prompt-echo"),
+               say("original answer"), result("original answer", "turn-result")],
+        steers=[[echo("continue", "echo-steer"), say("steer answer"),
+                 result("steer answer", "steer-result", {"kind": "human"})]],
+        on_delta_steers=["continue"],
+    )
+    try:
+        turn = _bounded_turn(session, "continue")
+    finally:
+        session.close()
+
+    assert turn.error is None
+    assert [(text, left) for text, _rows, _index, left in calls] == [(None, 1), ("continue", 0)], (
+        "the prompt's result settles no steer; the steer's own result does"
+    )
+    assert turn.final_text == "steer answer"
+    assert turn.turn_id == "steer-result"
+
+
+def _lifecycle_frame():
+    from tests.agent.claude_sdk_fakes import SystemMessage
+
+    return SystemMessage(subtype="status", data={"status": "idle"})
+
+
+def _observed_lifecycle_frames(session):
+    """Record every SystemMessage the session's lifecycle observer is shown."""
+    seen = []
+    original = session._observe_sdk_lifecycle
+
+    def observe(message):
+        if type(message).__name__ == "SystemMessage":
+            seen.append(getattr(message, "subtype", None))
+        return original(message)
+
+    session._observe_sdk_lifecycle = observe
+    return seen
+
+
+def test_lifecycle_frame_after_the_held_result_does_not_lift_the_quiet_limit(monkeypatch, caplog):
+    """F4: a lifecycle frame is not a CLI turn. With one read after the held result and then silence,
+    the safety net still finishes the turn at its limit, with one warning; the frame is not lost."""
+    import logging
+
+    session, holder, calls, clock = _held_steer_session(
+        monkeypatch, ["zebra crossing"], hermes_session_id="sess-frame",
+    )
+    seen = _observed_lifecycle_frames(session)
+    thread, box = _turn_in_thread(session)
+    try:
+        with caplog.at_level(logging.WARNING, logger="agent.transports.claude_agent_sdk_session"):
+            _await_held_result(calls, clock, 1)
+            holder["client"].feed(_lifecycle_frame())
+            assert _wait_until(lambda: not holder["client"]._pending)
+            clock.now = 59.0
+            thread.join(0.3)
+            assert thread.is_alive(), "the safety net must not fire before its limit"
+            clock.now = 61.0
+            thread.join(3.0)
+            assert not thread.is_alive(), "a lifecycle frame lifted the quiet limit: the turn hangs"
+        turn = box["turn"]
+        assert turn.error is None and turn.interrupted is False
+        assert turn.final_text == "original answer"
+        assert turn.turn_id == "turn-result"
+        warnings = _steer_warnings(caplog)
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert "sess-frame" in warnings[0].getMessage()
+        assert "zebra" not in caplog.text, "no message content in logs"
+        assert seen.count("status") == 1, "the lifecycle frame is observed exactly once"
+        assert [m["content"] for m in turn.projected_messages if m["role"] == "user"] == ["zebra crossing"]
+    finally:
+        session.close()
+        thread.join(3.0)
+
+
+def test_stop_releases_after_a_lifecycle_frame_followed_by_silence(monkeypatch):
+    """F4: the same frame must not put Stop back behind a result that cannot come."""
+    session, holder, calls, clock = _held_steer_session(monkeypatch, ["first"])
+    seen = _observed_lifecycle_frames(session)
+    thread, box = _turn_in_thread(session)
+    try:
+        _await_held_result(calls, clock, 1)
+        holder["client"].feed(_lifecycle_frame())
+        assert _wait_until(lambda: not holder["client"]._pending)
+        session.request_interrupt()
+        clock.now = 5.0
+        thread.join(3.0)
+        assert not thread.is_alive(), "Stop did not release after a lifecycle frame"
+        turn = box["turn"]
+        assert turn.interrupted is True and turn.error is None
+        assert seen.count("status") == 1
+    finally:
+        session.close()
+        thread.join(3.0)
+
+
+def test_lifecycle_frame_before_the_steer_turn_is_read_in_order(monkeypatch, caplog):
+    """F4: frames read while the wait is bounded are not dropped or reordered when the CLI then runs
+    the steer's turn."""
+    import logging
+
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    session, holder, calls, clock = _held_steer_session(monkeypatch, ["first"])
+    seen = _observed_lifecycle_frames(session)
+    thread, box = _turn_in_thread(session)
+    try:
+        with caplog.at_level(logging.WARNING, logger="agent.transports.claude_agent_sdk_session"):
+            _await_held_result(calls, clock, 1)
+            holder["client"].feed(_lifecycle_frame())
+            assert _wait_until(lambda: not holder["client"]._pending)
+            holder["client"].feed(
+                echo("first", "echo-first"), say("answer first"),
+                result("answer first", "first-result", {"kind": "human"}),
+            )
+            thread.join(3.0)
+            assert not thread.is_alive()
+        turn = box["turn"]
+        assert turn.error is None and turn.interrupted is False
+        assert turn.final_text == "answer first"
+        assert turn.turn_id == "first-result"
+        assert seen.count("status") == 1
+        assert _steer_warnings(caplog) == []
+        assert _shape(_persisted_rows(calls, turn)) == [
+            ("assistant", "original answer"), ("user", "first"), ("assistant", "answer first"),
+        ]
+    finally:
+        session.close()
+        thread.join(3.0)
+
+
+def test_replay_carrying_a_non_text_block_is_not_a_steers_echo():
+    """F5: a steer is written as plain text. A user message with the same words plus an attachment
+    block is something else: it must not mark the steer consumed."""
+    from tests.agent.claude_sdk_fakes import TextBlock, UserMessage
+
+    class ImageBlock:
+        def __init__(self, source):
+            self.source = source
+
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    mixed = UserMessage(content=[TextBlock("x"), ImageBlock({"type": "base64", "data": ""})])
+    mixed.origin = {"kind": "human"}
+    mixed.uuid = "mixed"
+    session, holder, calls = _scripted_session(
+        first=[echo("initial", "prompt-echo", origin=None), delta("typing"), mixed, say("original answer"),
+               result("original answer", "turn-result")],
+        steers=[[echo("x", "echo-x"), say("answer x"), result("answer x", "x-result", {"kind": "human"})]],
+        on_delta_steers=["x"],
+    )
+    try:
+        turn = _bounded_turn(session)
+    finally:
+        session.close()
+
+    assert turn.error is None
+    assert [(text, left) for text, _rows, _index, left in calls] == [(None, 1), ("x", 0)], (
+        "only the steer's own text-only replay marks it consumed"
+    )
+    assert turn.final_text == "answer x"
+    assert turn.turn_id == "x-result"
+
+
+def test_text_only_replay_in_block_form_is_still_a_steers_echo():
+    """F5: the gate rejects non-text blocks only; a replay delivered as text blocks still matches."""
+    from tests.agent.claude_sdk_fakes import TextBlock, UserMessage
+
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    blocks = UserMessage(content=[TextBlock("x")])
+    blocks.origin = {"kind": "human"}
+    blocks.uuid = "echo-x"
+    session, holder, calls = _scripted_session(
+        first=[echo("initial", "prompt-echo", origin=None), tool_call(), delta("typing")],
+        steers=[[tool_result(), blocks, say("folded answer"), result("folded answer", "turn-result")]],
+        on_delta_steers=["x"],
+    )
+    try:
+        turn = _bounded_turn(session)
+    finally:
+        session.close()
+
+    assert turn.error is None, f"the host turn never finished: {turn.error}"
+    assert turn.final_text == "folded answer"
+    assert [(text, left) for text, _rows, _index, left in calls] == [("x", 0)]

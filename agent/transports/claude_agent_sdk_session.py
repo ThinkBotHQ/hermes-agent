@@ -179,9 +179,15 @@ def _cli_model_id(model):
 
 
 
-def _forget_steer_mark(owner: Any, text: str) -> None:
-    """Drop the newest position mark for *text* (caller holds the commit lock)."""
+def _forget_steer_mark(owner: Any, text: str, seq: Optional[int] = None) -> None:
+    """Drop the mark of the steer written as number *seq*, else the newest one for *text* (caller
+    holds the commit lock)."""
     marks = getattr(owner, "_pending_steer_marks", [])
+    if seq is not None:
+        for index in range(len(marks) - 1, -1, -1):
+            if marks[index].get("seq") == seq:
+                del marks[index]
+                return
     for index in range(len(marks) - 1, -1, -1):
         if marks[index].get("text") == text:
             del marks[index]
@@ -411,8 +417,9 @@ class ClaudeAgentSdkSession(
         # consumes it): that steer is inside the CLI turn now running, so that turn's result
         # settles it whatever origin the result carries.
         self._pending_steer_marks: list[dict[str, Any]] = []
-        # Counts steers admitted for writing. A turn waiting on steer results compares it with the
-        # value at the last result to know whether the CLI was handed anything since.
+        # Numbers steers as they are admitted for writing; each mark carries its number as ``seq``.
+        # A turn waiting on steer results reads the value at the last result: a pending mark with a
+        # later ``seq`` is a steer the CLI was handed since (a failed write drops its mark again).
         self._steer_write_seq = 0
         # Clock for that wait's stop grace and quiet limit (None = time.monotonic); tests inject one.
         self._steer_wait_clock: Optional[Callable[[], float]] = None
@@ -1570,8 +1577,10 @@ class ClaudeAgentSdkSession(
             self._pending_steer_inputs = getattr(self, "_pending_steer_inputs", [])
             self._pending_steer_inputs.append(cleaned)
             self._pending_steer_marks = getattr(self, "_pending_steer_marks", [])
-            self._pending_steer_marks.append({"text": cleaned, "ts": time.time(), "pos": None})
-            self._steer_write_seq = getattr(self, "_steer_write_seq", 0) + 1
+            write_seq = self._steer_write_seq = getattr(self, "_steer_write_seq", 0) + 1
+            self._pending_steer_marks.append(
+                {"text": cleaned, "ts": time.time(), "pos": None, "seq": write_seq}
+            )
         client = self._client
         loop = self._loop
         if client is None or loop is None:
@@ -1581,7 +1590,7 @@ class ClaudeAgentSdkSession(
                 )
                 if self._pending_steer_inputs and self._pending_steer_inputs[-1] == cleaned:
                     self._pending_steer_inputs.pop()
-                _forget_steer_mark(self, cleaned)
+                _forget_steer_mark(self, cleaned, write_seq)
             return False
         try:
             query = client.query(_sdk_user_message_stream(cleaned, origin={"kind": "human"}))
@@ -1603,7 +1612,7 @@ class ClaudeAgentSdkSession(
                         inputs = getattr(self, "_pending_steer_inputs", [])
                         if cleaned in inputs:
                             inputs.remove(cleaned)
-                        _forget_steer_mark(self, cleaned)
+                        _forget_steer_mark(self, cleaned, write_seq)
                     logger.debug("SDK steer query failed after scheduling", exc_info=True)
 
             future.add_done_callback(_finish_steer)
@@ -1616,7 +1625,7 @@ class ClaudeAgentSdkSession(
                 )
                 if self._pending_steer_inputs and self._pending_steer_inputs[-1] == cleaned:
                     self._pending_steer_inputs.pop()
-                _forget_steer_mark(self, cleaned)
+                _forget_steer_mark(self, cleaned, write_seq)
             logger.debug("SDK steer scheduling failed", exc_info=True)
             return False
         logger.info(
