@@ -407,7 +407,15 @@ class ClaudeAgentSdkSession(
         # steer was typed (stamped by the turn loop on the next stream message),
         # so the owner's row lands where it was sent, not before or after the
         # whole turn's output.
+        # ``echoed`` is set once the CLI replayed the steer (it replays a stdin message when it
+        # consumes it): that steer is inside the CLI turn now running, so that turn's result
+        # settles it whatever origin the result carries.
         self._pending_steer_marks: list[dict[str, Any]] = []
+        # Counts steers admitted for writing. A turn waiting on steer results compares it with the
+        # value at the last result to know whether the CLI was handed anything since.
+        self._steer_write_seq = 0
+        # Clock for that wait's stop grace and quiet limit (None = time.monotonic); tests inject one.
+        self._steer_wait_clock: Optional[Callable[[], float]] = None
         # The foreground coroutine owns this acknowledgement while waiting
         # for the reader to publish its claim.  Shutdown resolves it even if
         # the reader cancellation has already dequeued the claim.
@@ -1563,6 +1571,7 @@ class ClaudeAgentSdkSession(
             self._pending_steer_inputs.append(cleaned)
             self._pending_steer_marks = getattr(self, "_pending_steer_marks", [])
             self._pending_steer_marks.append({"text": cleaned, "ts": time.time(), "pos": None})
+            self._steer_write_seq = getattr(self, "_steer_write_seq", 0) + 1
         client = self._client
         loop = self._loop
         if client is None or loop is None:

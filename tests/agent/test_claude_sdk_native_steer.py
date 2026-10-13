@@ -1009,3 +1009,435 @@ def test_folded_steer_never_lands_between_a_tool_call_and_its_result():
     _persist_steer_boundary(types.SimpleNamespace(_session_db=None), transcript, text, settled, index)
     _assert_steer_outside_tool_group(transcript)
     assert [m["role"] for m in transcript][-2:] == ["user", "assistant"]
+
+
+# --- a steer the CLI folds into the running turn settles with that turn's result ------------------
+#
+# Live 2026-10-13: the owner typed mid-turn, the CLI took the steer in right after a tool result (its
+# echo appeared INSIDE the running turn) and ended the whole turn with ONE result that was not
+# human-origin. The host turn waited for a second, human-origin result that never came.
+
+
+def _fold_fakes():
+    from tests.agent.claude_sdk_fakes import ToolResultBlock, ToolUseBlock, UserMessage
+
+    AssistantMessage, TextBlock, _EOS, _FakeClient, result, delta = _steer_order_fakes()
+
+    def echo(text, uuid=None, origin="human"):
+        """The CLI's replay of one stdin user message, emitted when it consumes that message."""
+        message = UserMessage(content=text)
+        message.origin = {"kind": origin} if origin else None
+        message.uuid = uuid
+        return message
+
+    def tool_call():
+        return AssistantMessage(content=[ToolUseBlock(id="tx", name="Bash", input={})])
+
+    def tool_result():
+        return UserMessage(content=[ToolResultBlock(tool_use_id="tx", content="done")])
+
+    def say(text):
+        return AssistantMessage(content=[TextBlock(text)])
+
+    return _FakeClient, result, delta, echo, tool_call, tool_result, say
+
+
+def _scripted_session(first, steers, on_delta_steers=(), **kwargs):
+    """A session whose fake CLI answers the prompt with ``first`` and the n-th steer with ``steers[n]``.
+
+    ``on_delta_steers`` are sent, in order, on the first stream delta (the owner typing mid-turn)."""
+    from agent.transports.claude_agent_sdk_session import ClaudeAgentSdkSession
+
+    _FakeClient = _fold_fakes()[0]
+    holder = {"steer_results": []}
+
+    class Client(_FakeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                self.queried.append(prompt)
+                turn = len([item for item in self.queried if isinstance(item, str)])
+                self._pending.extend(first if turn == 1 else holder.get("later", {}).get(prompt, ()))
+                return
+            self.queried.append([message async for message in prompt])
+            number = len([item for item in self.queried if isinstance(item, list)])
+            self._pending.extend(steers[number - 1] if number <= len(steers) else ())
+
+    def factory(options=None):
+        holder["client"] = Client(options=options)
+        return holder["client"]
+
+    sent = False
+
+    def on_delta(_text):
+        nonlocal sent
+        if not sent:
+            sent = True
+            for text in on_delta_steers:
+                holder["steer_results"].append(session.steer(text))
+
+    calls = []
+    session = ClaudeAgentSdkSession(
+        cwd="/tmp", model="claude-opus-4-8", client_factory=factory, on_stream_delta=on_delta, **kwargs,
+    )
+    session._on_steer_settled = lambda text, settled, index=None: calls.append(
+        (text, list(settled), index, session._pending_steer_results)
+    )
+    return session, holder, calls
+
+
+def _bounded_turn(session, prompt="initial"):
+    """Run one turn; a turn that never finishes trips the idle limit instead of hanging the suite."""
+    return session.run_turn(prompt, turn_timeout=1.5, watch_poll_interval=0.05, abort_grace=0.2)
+
+
+def _transcript(calls):
+    from agent.claude_sdk_runtime_continuity import _persist_steer_boundary
+
+    rows = []
+    for text, settled, index, _pending in calls:
+        _persist_steer_boundary(types.SimpleNamespace(_session_db=None), rows, text, settled, index)
+    return rows
+
+
+def _shape(rows):
+    return [
+        (row["role"], "call" if row.get("tool_calls") else row.get("content"))
+        for row in rows if row["role"] in {"user", "assistant", "tool"}
+    ]
+
+
+def test_folded_steer_settles_with_the_running_turns_result():
+    """T1, the incident: the steer's echo was seen inside the running turn, so that turn's single
+    (not human-origin) result is the steer's result too and ends the host turn."""
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    session, holder, calls = _scripted_session(
+        first=[echo("initial", "prompt-echo", origin=None), tool_call(), delta("typing")],
+        steers=[[tool_result(), echo("x", "echo-x"), say("folded answer"),
+                 result("folded answer", "turn-result")]],
+        on_delta_steers=["x"],
+    )
+    try:
+        turn = _bounded_turn(session)
+    finally:
+        session.close()
+
+    assert holder["steer_results"] == [True]
+    assert turn.error is None, f"the host turn never finished: {turn.error}"
+    assert turn.final_text == "folded answer"
+    assert turn.turn_id == "turn-result"
+    assert turn.interrupted is False
+    assert [(text, pending) for text, _rows, _index, pending in calls] == [("x", 0)], (
+        "the folded steer is settled once, by the turn's own result, and nothing stays pending"
+    )
+    assert _shape(_transcript(calls)) == [
+        ("assistant", "call"), ("tool", "done"), ("user", "x"), ("assistant", "folded answer"),
+    ]
+    assert [m for m in turn.projected_messages if m["role"] == "user"] == [], (
+        "the steer row is written once, at its boundary, never again at the turn's end"
+    )
+
+
+def test_steer_after_a_folded_result_finishes_on_its_own_human_result(monkeypatch):
+    """T2, the incident's second step: with the folded steer settled the count is back to zero, so a
+    later steer the idle CLI runs as its OWN turn ends the host turn on its human-origin result."""
+    from agent.transports import claude_agent_sdk_session_turn as turn_module
+
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    session, holder, calls = _scripted_session(
+        first=[echo("initial", "prompt-echo", origin=None), tool_call(), delta("typing")],
+        steers=[
+            [tool_result(), echo("x", "echo-x"), say("folded answer"), result("folded answer", "turn-result")],
+            [echo("y", "echo-y"), say("answer y"), result("answer y", "y-result", {"kind": "human"})],
+        ],
+        on_delta_steers=["x"],
+    )
+    original_project = turn_module.ClaudeSdkTurnMixin._project_message_step
+    later = []
+
+    def project(projector, watch, message, out):
+        projection = original_project(projector, watch, message, out)
+        if type(message).__name__ == "ResultMessage" and not later:
+            # The CLI is idle (its turn just ended) and the host turn has not released yet.
+            later.append(session.steer("y"))
+        return projection
+
+    monkeypatch.setattr(turn_module.ClaudeSdkTurnMixin, "_project_message_step", staticmethod(project))
+    try:
+        turn = _bounded_turn(session)
+    finally:
+        session.close()
+
+    assert later == [True], "the folded turn's result must reach projection as the turn's own result"
+    assert turn.error is None, f"the host turn never finished: {turn.error}"
+    assert turn.final_text == "answer y"
+    assert turn.turn_id == "y-result"
+    assert [(text, pending) for text, _rows, _index, pending in calls] == [("x", 0), ("y", 0)]
+
+
+def test_two_steers_first_folded_second_its_own_turn_finish_in_order():
+    """T3: the first steer is folded into the running turn, the second runs as its own CLI turn. The
+    host turn ends on the second's result; rows and answers keep the order they were sent in, the same
+    order two separately answered steers already have (prompt output, steer 1, answer 1, steer 2, answer 2)."""
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    session, holder, calls = _scripted_session(
+        first=[echo("initial", "prompt-echo", origin=None), tool_call(), delta("typing")],
+        steers=[
+            [tool_result(), echo("x", "echo-x"), say("answer x"), result("answer x", "turn-result")],
+            [echo("y", "echo-y"), say("answer y"), result("answer y", "y-result", {"kind": "human"})],
+        ],
+        on_delta_steers=["x", "y"],
+    )
+    try:
+        turn = _bounded_turn(session)
+    finally:
+        session.close()
+
+    assert holder["steer_results"] == [True, True]
+    assert turn.error is None, f"the host turn never finished: {turn.error}"
+    assert turn.final_text == "answer y", "the host turn stays open until the second steer's result"
+    assert turn.turn_id == "y-result"
+    assert [(text, pending) for text, _rows, _index, pending in calls] == [("x", 1), ("y", 0)], (
+        "each result settles the steer it answered: the folded one first, then the one run alone"
+    )
+    assert _shape(_transcript(calls)) == [
+        ("assistant", "call"), ("tool", "done"), ("user", "x"), ("assistant", "answer x"),
+        ("user", "y"), ("assistant", "answer y"),
+    ]
+
+
+def test_steer_not_yet_consumed_keeps_the_turn_open_until_its_own_result():
+    """T4: the running turn's result arrives BEFORE the steer's echo, so the steer is still queued in
+    the CLI: the host turn stays open and the steer's own human-origin result finishes it."""
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    session, holder, calls = _scripted_session(
+        first=[echo("initial", "prompt-echo", origin=None), delta("typing"), say("original answer"),
+               result("original answer", "turn-result")],
+        steers=[[echo("y", "echo-y"), say("answer y"), result("answer y", "y-result", {"kind": "human"})]],
+        on_delta_steers=["y"],
+    )
+    try:
+        turn = _bounded_turn(session)
+    finally:
+        session.close()
+
+    assert turn.error is None
+    assert turn.final_text == "answer y"
+    assert turn.turn_id == "y-result"
+    assert [(text, pending) for text, _rows, _index, pending in calls] == [(None, 1), ("y", 0)], (
+        "the first result settles no steer and leaves the turn open"
+    )
+    assert _shape(_transcript(calls)) == [
+        ("assistant", "original answer"), ("user", "y"), ("assistant", "answer y"),
+    ]
+
+
+def test_two_steers_folded_into_one_turn_settle_with_its_single_result():
+    """Both steers were consumed at the same tool boundary: one result settles both, and their text is
+    one user row (never two user rows in a row)."""
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    session, holder, calls = _scripted_session(
+        first=[echo("initial", "prompt-echo", origin=None), tool_call(), delta("typing")],
+        steers=[[tool_result(), echo("x", "echo-x"), echo("y", "echo-y"), say("answer both"),
+                 result("answer both", "turn-result")], []],
+        on_delta_steers=["x", "y"],
+    )
+    try:
+        turn = _bounded_turn(session)
+    finally:
+        session.close()
+
+    assert turn.error is None, f"the host turn never finished: {turn.error}"
+    assert turn.final_text == "answer both"
+    assert turn.turn_id == "turn-result"
+    assert [pending for _text, _rows, _index, pending in calls] == [0]
+    assert _shape(_transcript(calls)) == [
+        ("assistant", "call"), ("tool", "done"), ("user", "x\ny"), ("assistant", "answer both"),
+    ]
+
+
+def test_prompt_echo_with_the_steers_text_is_not_the_steers_echo():
+    """The CLI may stamp its replay of the host prompt human too. A steer with the same words, written
+    before that replay arrived, is still queued: the prompt's echo must not settle it."""
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    session, holder, calls = _scripted_session(
+        first=[delta("typing"), echo("continue", "prompt-echo"), say("original answer"),
+               result("original answer", "turn-result")],
+        steers=[[echo("continue", "echo-steer"), say("steer answer"),
+                 result("steer answer", "steer-result", {"kind": "human"})]],
+        on_delta_steers=["continue"],
+    )
+    try:
+        turn = _bounded_turn(session, "continue")
+    finally:
+        session.close()
+
+    assert turn.error is None
+    assert turn.final_text == "steer answer"
+    assert turn.turn_id == "steer-result"
+
+
+def test_steer_folded_into_an_injected_turn_settles_with_that_turns_result():
+    """The steer was still queued when the host's turn ended; the CLI then ran an injected turn and
+    consumed the steer inside it. That turn's one result (injected origin) answers the steer."""
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    delivered = []
+    session, holder, calls = _scripted_session(
+        first=[echo("initial", "prompt-echo", origin=None), delta("typing"), say("original answer"),
+               result("original answer", "turn-result")],
+        steers=[[echo("a background task finished", "wake", origin="task-notification"), tool_call(),
+                 tool_result(), echo("x", "echo-x"), say("did both"),
+                 result("did both", "injected-result", {"kind": "task-notification"})]],
+        on_delta_steers=["x"],
+        on_unsolicited_result=lambda texts, items=None: delivered.append((texts, items)),
+    )
+    try:
+        turn = _bounded_turn(session)
+    finally:
+        session.close()
+
+    assert turn.error is None, f"the host turn never finished: {turn.error}"
+    assert turn.final_text == "did both"
+    assert turn.turn_id == "injected-result"
+    assert delivered == [], "the result that answered the steer is not a background delivery"
+    assert [(text, pending) for text, _rows, _index, pending in calls] == [(None, 1), ("x", 0)]
+
+
+class _SteerWaitClock:
+    """Injectable clock: reports when the turn starts waiting on steer results and lets a test jump it."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.waiting = threading.Event()
+
+    def __call__(self):
+        self.waiting.set()
+        return self.now
+
+
+def _turn_in_thread(session, prompt="initial"):
+    box = {}
+
+    def run():
+        box["turn"] = session.run_turn(prompt, turn_timeout=30.0, watch_poll_interval=0.05, abort_grace=0.2)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, box
+
+
+def _idle_steer_wait_session(monkeypatch, steers=((),), **kwargs):
+    """A host turn whose CLI turn has ended while one steer's result is still awaited."""
+    from agent.transports import claude_agent_sdk_session_turn as turn_module
+
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    monkeypatch.setattr(turn_module, "_STEER_WAIT_POLL_SECONDS", 0.01, raising=False)
+    session, holder, calls = _scripted_session(
+        first=[echo("initial", "prompt-echo", origin=None), delta("typing"), say("original answer"),
+               result("original answer", "turn-result")],
+        steers=list(steers),
+        on_delta_steers=["never answered"],
+        **kwargs,
+    )
+    holder["later"] = {"next": [echo("next", "next-echo", origin=None), say("next answer"),
+                                result("next answer", "next-result")]}
+    clock = session._steer_wait_clock = _SteerWaitClock()
+    return session, holder, calls, clock
+
+
+def _await_open_result(calls, clock):
+    """Block until the turn's own result was read with the steer still unanswered (the stuck state)."""
+    import time
+
+    deadline = time.monotonic() + 5.0
+    while not calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert [(text, pending) for text, _rows, _index, pending in calls] == [(None, 1)]
+    clock.waiting.wait(1.0)  # the wait reads its start time before a test moves the clock
+
+
+def test_stop_releases_a_turn_waiting_on_steer_results_with_an_idle_cli(monkeypatch):
+    """T5: the CLI's last message was a result and nothing was written since, so the interrupt can
+    produce no result. Stop must end the host turn, and the next prompt must run normally."""
+    session, holder, calls, clock = _idle_steer_wait_session(monkeypatch)
+    thread, box = _turn_in_thread(session)
+    try:
+        _await_open_result(calls, clock)
+        session.request_interrupt()
+        clock.now = 5.0
+        thread.join(3.0)
+        released = not thread.is_alive()
+        assert released, "Stop did not release a host turn that waits on an idle CLI"
+        turn = box["turn"]
+        assert turn.interrupted is True
+        assert turn.error is None
+        assert turn.should_retire is False
+        assert holder["client"].interrupted is True, "the CLI is still told to stop"
+        assert ("user", "never answered") in _shape(turn.projected_messages), (
+            "the owner's steer keeps its row even though no result answered it"
+        )
+        assert session._pending_steer_results == 0 and session._turn_inbox is None
+        following = session.run_turn("next", turn_timeout=3.0, watch_poll_interval=0.05, abort_grace=0.2)
+        assert following.error is None and following.interrupted is False
+        assert following.final_text == "next answer"
+    finally:
+        session.close()
+        thread.join(3.0)
+
+
+def test_stop_waits_for_a_steer_turn_the_cli_is_just_starting(monkeypatch):
+    """Stop pressed in the instant between a turn's result and the queued steer's own turn: the CLI is
+    not idle, so the host turn keeps reading until that turn's result instead of orphaning it."""
+    _FakeClient, result, delta, echo, tool_call, tool_result, say = _fold_fakes()
+    session, holder, calls, clock = _idle_steer_wait_session(monkeypatch)
+    thread, box = _turn_in_thread(session)
+    try:
+        _await_open_result(calls, clock)
+        session.request_interrupt()
+        holder["client"].feed(
+            echo("never answered", "late-echo"), say("late answer"),
+            result("late answer", "late-result", {"kind": "human"}),
+        )
+        thread.join(3.0)
+        assert not thread.is_alive()
+        turn = box["turn"]
+        assert turn.interrupted is True
+        assert turn.turn_id == "late-result", "the steer turn's result was read by the turn that owns it"
+        assert session._unsolicited_results == 0
+    finally:
+        session.close()
+        thread.join(3.0)
+
+
+def test_quiet_cli_after_a_result_finishes_the_turn_with_one_warning(monkeypatch, caplog):
+    """T6, the safety net: a result was read, the CLI then produced nothing for the quiet limit and the
+    turn is open only for a steer result. Finish with the answer it has and say so once."""
+    import logging
+
+    from agent.transports import claude_agent_sdk_session_turn as turn_module
+
+    session, holder, calls, clock = _idle_steer_wait_session(monkeypatch, hermes_session_id="sess-quiet")
+    thread, box = _turn_in_thread(session)
+    try:
+        with caplog.at_level(logging.WARNING, logger="agent.transports.claude_agent_sdk_session"):
+            _await_open_result(calls, clock)
+            assert turn_module._STEER_WAIT_QUIET_SECONDS == 60.0
+            clock.now = 59.0
+            thread.join(0.3)
+            assert thread.is_alive(), "the safety net must not fire before its limit"
+            clock.now = 61.0
+            thread.join(3.0)
+            assert not thread.is_alive(), "the safety net did not finish the turn"
+        turn = box["turn"]
+        assert turn.error is None
+        assert turn.interrupted is False
+        assert turn.final_text == "original answer"
+        assert turn.turn_id == "turn-result"
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "steer" in r.getMessage()]
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        text = warnings[0].getMessage()
+        assert "sess-quiet" in text and "pending=1" in text
+        assert "never answered" not in caplog.text, "no message content in logs"
+        assert ("user", "never answered") in _shape(turn.projected_messages)
+    finally:
+        session.close()
+        thread.join(3.0)

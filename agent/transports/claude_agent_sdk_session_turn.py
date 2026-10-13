@@ -41,7 +41,7 @@ from agent.transports.claude_agent_sdk_session_config import (
     _configured_turn_timeout,
     _configured_turn_tool_max_suspend,
 )
-from agent.transports.claude_sdk_peer_envelope import effective_origin
+from agent.transports.claude_sdk_peer_envelope import effective_origin, message_text
 from agent.transports.claude_sdk_peer_envelope import parse as parse_peer_envelope
 from agent.transports.claude_agent_sdk_session_child import SdkShuttingDownError
 from agent.transports.claude_agent_sdk_session_watchdog import (
@@ -62,6 +62,65 @@ logger = logging.getLogger("agent.transports.claude_agent_sdk_session")
 # Unsolicited deliveries retained while no result callback is wired (G2.4); newest kept.
 _MAX_RETAINED_UNSOLICITED = 16
 _MAX_RETAINED_UNSOLICITED_IDS = 512
+
+
+# A CLI turn has ended (its ResultMessage was read) and the host turn stays open only for the results
+# of steers still pending. Normally the CLI starts the next queued steer at once; these bound the wait
+# when it does not. Stop releases the turn once the CLI has stayed silent for the grace with nothing
+# written to it since that result (an interrupt on an idle CLI yields no result). The quiet limit is
+# the safety net: whatever the cause, the turn finishes with the last result instead of hanging.
+_STEER_WAIT_QUIET_SECONDS = 60.0
+_STEER_WAIT_STOP_GRACE_SECONDS = 1.0
+_STEER_WAIT_POLL_SECONDS = 0.1
+_NO_MESSAGE: Any = object()
+
+
+def _prompt_echo_text(prompt: Any) -> Optional[str]:
+    """The text the CLI's replay of this turn's own prompt carries (None: no prompt was sent)."""
+    if isinstance(prompt, str):
+        return prompt.strip()
+    if isinstance(prompt, list):
+        return "\n".join(
+            str(block.get("text") or "") for block in prompt
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+    return None
+
+
+def _steer_settle_batches(
+    messages: list, start: int, settled: list[tuple[Optional[str], Optional[dict]]]
+) -> list[tuple[Optional[str], list, Optional[int]]]:
+    """``_on_steer_settled`` arguments for the steers one ResultMessage settled.
+
+    None or one steer: the unsettled projection ``messages[start:]`` and where the steer was typed in
+    it. Several (all consumed inside the same CLI turn): the projection is cut at each later steer so
+    every call still carries one user row; steers typed at the same point share one row, so two user
+    rows never sit in a row."""
+    rows = messages[start:]
+
+    def typed_at(mark: Optional[dict]) -> Optional[int]:
+        pos = (mark or {}).get("pos")
+        return None if pos is None else max(0, min(pos - start, len(rows)))
+
+    if len(settled) <= 1:
+        text, mark = settled[0] if settled else (None, None)
+        return [(text, rows, typed_at(mark))]
+    from agent.claude_sdk_runtime_continuity import steer_insert_index
+
+    placed: list[tuple[int, str]] = []
+    for text, mark in settled:
+        at = steer_insert_index(rows, typed_at(mark) or 0)
+        if placed and at <= placed[-1][0]:
+            placed[-1] = (placed[-1][0], f"{placed[-1][1]}\n{text or ''}")
+        else:
+            placed.append((at, text or ""))
+    batches: list[tuple[Optional[str], list, Optional[int]]] = []
+    cursor = 0
+    for number, (at, text) in enumerate(placed):
+        end = placed[number + 1][0] if number + 1 < len(placed) else len(rows)
+        batches.append((text, rows[cursor:end], at - cursor))
+        cursor = end
+    return batches
 
 
 def _remember_recent_id(owner: Any, seen_name: str, order_name: str, value: str) -> bool:
@@ -982,6 +1041,13 @@ class ClaudeSdkTurnMixin:
         billing_guarded = False
         held_interim_assistant: Any = None
         persisted_projection_count = 0
+        # A message read while waiting behind a result that left the turn open; consumed next.
+        lookahead: Any = _NO_MESSAGE
+        steer_wait_abandoned = False
+        steer_seq_at_result = 0
+        # Cleared when this turn's own prompt is replayed; a steer's replay can only follow it.
+        own_prompt_echo_text = _prompt_echo_text(prompt)
+        steer_echo_uuids: set[str] = set()
 
         def _flush_interim_assistant() -> None:
             nonlocal held_interim_assistant
@@ -1047,7 +1113,10 @@ class ClaudeSdkTurnMixin:
             else:
                 await self._client.query(query_input)
             while True:
-                message = await inbox.get()
+                if lookahead is _NO_MESSAGE:
+                    message = await inbox.get()
+                else:
+                    message, lookahead = lookahead, _NO_MESSAGE
                 watch = self._turn_watch
                 if watch is not None:
                     # Any stream message is liveness — stamp before anything
@@ -1111,6 +1180,10 @@ class ClaudeSdkTurnMixin:
                         # away left the host turn running until the idle limit and parked every
                         # owner message queued behind it (live 2026-09-30, session c68a80).
                         own_envelope_sender = None
+                    elif self._steer_consumed_in_cli_turn():
+                        # A queued steer was consumed inside this injected turn (its replay was
+                        # read while the turn ran): the turn's one result answers the steer too.
+                        pass
                     else:
                         self._handle_unsolicited(message)
                         continue
@@ -1122,6 +1195,18 @@ class ClaudeSdkTurnMixin:
                     and origin.get("kind") == "peer"
                 ):
                     self._deliver_host_peer_item(message, origin)
+                if type(message).__name__ == "UserMessage" and _is_own_prompt_echo(message):
+                    # The CLI replays a stdin message when it CONSUMES it. A pending steer's replay
+                    # seen here means the steer is inside the CLI turn now running, and that turn's
+                    # ResultMessage settles it. Matched on the text written: the replay's uuid is the
+                    # CLI's own (nothing was sent to correlate) and its origin stamp is not reliable.
+                    echo_text = message_text(getattr(message, "content", None)).strip()
+                    if own_prompt_echo_text is not None and echo_text == own_prompt_echo_text:
+                        # This turn's own prompt: stdin order puts it ahead of any steer's replay,
+                        # also of a steer with the same words.
+                        own_prompt_echo_text = None
+                    else:
+                        self._note_steer_echo(echo_text, getattr(message, "uuid", None), steer_echo_uuids)
                 # Task lifecycle and provisional Bash records are stream
                 # concerns, not foreground-turn visibility. Observe before
                 # interrupt/billing gates so draining turns cannot orphan them.
@@ -1177,22 +1262,20 @@ class ClaudeSdkTurnMixin:
                     out["result_text"] = _safe_sdk_error_text(
                         getattr(message, "result", None)
                     )
-                    # A steer is a second query on the same SDK stream. Its
-                    # human-origin terminal result owns the live Hermes turn;
-                    # the prior query's un-attributed terminal result must not
-                    # close that turn first.
+                    # A steer is a second query on the same SDK stream. The CLI
+                    # either folds it into the turn it is running (that turn's ONE
+                    # result then answers it, whatever origin it carries) or runs it
+                    # as its own turn afterwards (human-origin result). Every steer
+                    # this result answered is settled here; the host turn stays
+                    # open only for steers the CLI has not consumed yet.
                     with self._interrupt_commit_lock:
                         pending_steer = getattr(self, "_pending_steer_results", 0)
-                        is_steer_result = pending_steer > 0 and _is_human_origin(message)
-                        if is_steer_result:
-                            self._pending_steer_results = pending_steer - 1
-                            pending_inputs = getattr(self, "_pending_steer_inputs", [])
-                            steer_text = pending_inputs.pop(0) if pending_inputs else None
-                            marks = getattr(self, "_pending_steer_marks", [])
-                            steer_mark = marks.pop(0) if marks else None
-                        else:
-                            steer_text = None
-                            steer_mark = None
+                        steer_seq_at_result = getattr(self, "_steer_write_seq", 0)
+                        settled_steers = (
+                            self._settle_steers_for_result_locked(_is_human_origin(message))
+                            if pending_steer > 0 else []
+                        )
+                        is_steer_result = bool(settled_steers)
                         pending_steer_after = getattr(
                             self, "_pending_steer_results", 0
                         )
@@ -1204,19 +1287,26 @@ class ClaudeSdkTurnMixin:
                     if pending_steer > 0:
                         callback = getattr(self, "_on_steer_settled", None)
                         if callable(callback):
-                            settled = out["messages"][persisted_projection_count:]
-                            steer_pos = (steer_mark or {}).get("pos")
-                            callback(
-                                steer_text, settled,
-                                None if steer_pos is None
-                                else max(0, min(steer_pos - persisted_projection_count, len(settled))),
-                            )
+                            for steer_text, settled, steer_index in _steer_settle_batches(
+                                out["messages"], persisted_projection_count, settled_steers
+                            ):
+                                callback(steer_text, settled, steer_index)
                         persisted_projection_count = len(out["messages"])
                     if pending_steer > 0 and (
                         not is_steer_result or pending_steer_after > 0
                     ):
                         _flush_interim_assistant()
-                        continue
+                        open_outcome, lookahead = await self._await_open_steer_result(
+                            inbox, steer_seq_at_result
+                        )
+                        if open_outcome == "message":
+                            continue
+                        if open_outcome == "stop":
+                            interrupted = True
+                            break
+                        # No result can follow ("drained": the pending steer's write failed;
+                        # "quiet": the safety net fired): this result ends the turn.
+                        steer_wait_abandoned = open_outcome == "quiet"
                 self._note_mcp_tool_use(message, out)
                 if not billing_guarded:
                     if not interrupted:
@@ -1266,20 +1356,36 @@ class ClaudeSdkTurnMixin:
                     # during projection must not discard the answer this
                     # ResultMessage just completed, nor reclassify a genuine
                     # terminal error as an honored interrupt.
-                    with self._interrupt_commit_lock:
-                        # A steer may have been admitted while projection was
-                        # running. Keep the result in this foreground turn and
-                        # wait for that steer result before committing.
-                        pending_steer_after_projection = getattr(
-                            self, "_pending_steer_results", 0
-                        )
-                        if not pending_steer_after_projection:
-                            boundary_interrupt = (
-                                interrupted or self._interrupt_event.is_set()
+                    open_outcome = None
+                    while True:
+                        with self._interrupt_commit_lock:
+                            # A steer may have been admitted while projection was
+                            # running. Keep the result in this foreground turn and
+                            # wait for that steer result before committing.
+                            pending_steer_after_projection = (
+                                0 if steer_wait_abandoned
+                                else getattr(self, "_pending_steer_results", 0)
                             )
-                            self._terminal_result_committed = True
-                    if pending_steer_after_projection:
+                            if not pending_steer_after_projection:
+                                boundary_interrupt = (
+                                    interrupted or self._interrupt_event.is_set()
+                                )
+                                self._terminal_result_committed = True
+                        if not pending_steer_after_projection:
+                            break
+                        open_outcome, lookahead = await self._await_open_steer_result(
+                            inbox, steer_seq_at_result
+                        )
+                        if open_outcome in ("message", "stop"):
+                            break
+                        # "drained" re-checks under the lock; "quiet" commits this result.
+                        steer_wait_abandoned = steer_wait_abandoned or open_outcome == "quiet"
+                        open_outcome = None
+                    if open_outcome == "message":
                         continue
+                    if open_outcome == "stop":
+                        interrupted = True
+                        break
                     out["terminal_result_accepted"] = True
                 if not interrupted and not billing_guarded:
                     if projection.messages:
@@ -1510,6 +1616,102 @@ class ClaudeSdkTurnMixin:
         out["billing_mode"] = self._reported_billing_mode()
         out["billing_evidence"] = dict(self._billing_evidence)
         return out
+
+    # ---------- steers pending on the live turn ----------
+
+    def _note_steer_echo(self, text: str, uuid: Any, seen_uuids: set) -> bool:
+        """Mark the oldest pending steer with this text as consumed by the CLI turn now running."""
+        if uuid and str(uuid) in seen_uuids:
+            return False  # the same replay delivered twice must not consume a second steer
+        with self._interrupt_commit_lock:
+            for mark in getattr(self, "_pending_steer_marks", ()):
+                if not mark.get("echoed") and mark.get("text") == text:
+                    mark["echoed"] = True
+                    if uuid:
+                        seen_uuids.add(str(uuid))
+                    return True
+        return False
+
+    def _steer_consumed_in_cli_turn(self) -> bool:
+        with self._interrupt_commit_lock:
+            return any(mark.get("echoed") for mark in getattr(self, "_pending_steer_marks", ()))
+
+    def _settle_steers_for_result_locked(
+        self, human_origin: bool
+    ) -> list[tuple[Optional[str], Optional[dict]]]:
+        """Settle every pending steer this ResultMessage answered. Caller holds the commit lock.
+
+        Steers whose replay was read since the previous result were consumed inside the CLI turn
+        this result ends: all of them settle, whatever the result's origin. With no replay seen, a
+        human-origin result still settles the oldest pending steer (a CLI that replays nothing).
+        Afterwards the count equals the steers written whose replay no result has followed."""
+        pending = getattr(self, "_pending_steer_results", 0)
+        inputs = getattr(self, "_pending_steer_inputs", [])
+        marks = getattr(self, "_pending_steer_marks", [])
+        echoed = [index for index, mark in enumerate(marks) if mark.get("echoed")]
+        if not echoed:
+            if not human_origin:
+                return []
+            self._pending_steer_results = pending - 1
+            return [(inputs.pop(0) if inputs else None, marks.pop(0) if marks else None)]
+        settled: list[tuple[Optional[str], Optional[dict]]] = []
+        for index in reversed(echoed):
+            mark = marks.pop(index)
+            text = mark.get("text")
+            if index < len(inputs) and inputs[index] == text:
+                del inputs[index]
+            elif text in inputs:
+                inputs.remove(text)
+            settled.append((text, mark))
+        settled.reverse()
+        self._pending_steer_results = max(0, pending - len(settled))
+        return settled
+
+    async def _await_open_steer_result(self, inbox: Any, steer_seq_at_result: int) -> tuple[str, Any]:
+        """Wait for the CLI's next message after a result that left the turn open for steer results.
+
+        Returns ``("message", message)`` normally. With no message it returns, lookahead empty:
+        ``"drained"`` when no steer is pending any more (its write failed after it was admitted),
+        ``"stop"`` when the user pressed Stop and the CLI has no turn in flight (nothing was written
+        to it since that result and it stayed silent for the grace; the interrupt cannot produce a
+        result), ``"quiet"`` when the CLI produced nothing for the quiet limit (logged once)."""
+        clock = getattr(self, "_steer_wait_clock", None) or time.monotonic
+        started = clock()
+        while True:
+            try:
+                return "message", await asyncio.wait_for(
+                    inbox.get(), timeout=_STEER_WAIT_POLL_SECONDS
+                )
+            except asyncio.TimeoutError:
+                pass
+            with self._interrupt_commit_lock:
+                pending = getattr(self, "_pending_steer_results", 0)
+                unconsumed = sum(
+                    1 for mark in getattr(self, "_pending_steer_marks", ()) if not mark.get("echoed")
+                )
+                written_since = getattr(self, "_steer_write_seq", 0) != steer_seq_at_result
+                stop_requested = self._interrupt_event.is_set()
+            if pending <= 0:
+                return "drained", _NO_MESSAGE
+            waited = clock() - started
+            session = (
+                getattr(self, "_hermes_session_id", None) or getattr(self, "_session_id", None) or "pending"
+            )
+            if stop_requested and not written_since and waited >= _STEER_WAIT_STOP_GRACE_SECONDS:
+                logger.info(
+                    "claude-agent-sdk: stop released a turn waiting on steer results with no CLI "
+                    "turn in flight session=%s pending=%d unconsumed=%d",
+                    session, pending, unconsumed,
+                )
+                return "stop", _NO_MESSAGE
+            if waited >= _STEER_WAIT_QUIET_SECONDS:
+                logger.warning(
+                    "claude-agent-sdk: no CLI output for %.0fs after a result while the turn waited "
+                    "only on steer results; finishing with the last result session=%s pending=%d "
+                    "unconsumed=%d written_since_result=%s",
+                    waited, session, pending, unconsumed, written_since,
+                )
+                return "quiet", _NO_MESSAGE
 
     # ---------- ungated per-message steps of _consume_turn ----------
     # Everything that depends on turn STATE (the interrupted / billing-guarded
