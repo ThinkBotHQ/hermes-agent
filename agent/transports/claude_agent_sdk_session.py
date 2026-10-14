@@ -407,6 +407,9 @@ class ClaudeAgentSdkSession(
         # steer was typed (stamped by the turn loop on the next stream message),
         # so the owner's row lands where it was sent, not before or after the
         # whole turn's output.
+        # ``echoed`` is set once the CLI replayed the steer (it replays a stdin message when it
+        # consumes it): that steer is inside the CLI turn now running, so that turn's result
+        # settles it whatever origin the result carries.
         self._pending_steer_marks: list[dict[str, Any]] = []
         # The foreground coroutine owns this acknowledgement while waiting
         # for the reader to publish its claim.  Shutdown resolves it even if
