@@ -34,6 +34,10 @@ plugins:
 
 Put the key in `$HERMES_HOME/.env` as `CNTRL_API_KEY=tb_…`.
 
+While cntrl is unreachable the pull loop logs one warning, then waits twice as
+long after each failed pull (up to 15 minutes), and logs once when a pull
+succeeds again.
+
 ## Run one pull by hand
 
 ```bash

@@ -55,9 +55,9 @@ def _task(i, **over):
 def conn(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
-    from hermes_cli import kanban_db as kdb
+    from hermes_cli.kanban_db_connect import connect
 
-    c = kdb.connect(db_path=tmp_path / "kanban.db")
+    c = connect(db_path=tmp_path / "kanban.db")
     yield c
     c.close()
 

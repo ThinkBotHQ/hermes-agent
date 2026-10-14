@@ -395,16 +395,26 @@ def api_key_from_env(cfg: dict) -> str:
     return os.environ.get(str(cfg.get("api_key_env") or DEFAULTS["api_key_env"]), "").strip()
 
 
+POLL_BACKOFF_MAX_SECONDS = 900
+
+
+def poll_backoff_seconds(base: float, failures: int) -> float:
+    """Wait after ``failures`` consecutive failed pulls: doubles from ``base``, capped."""
+    if failures <= 0:
+        return base
+    return min(max(base, POLL_BACKOFF_MAX_SECONDS), base * 2 ** min(failures, 16))
+
+
 def run_once(state: Any, *, cfg: Optional[dict] = None) -> dict:
     """One pull against the configured board. Used by the poll loop and the CLI runner."""
-    from hermes_cli import kanban_db as kdb
+    from hermes_cli.kanban_db_connect import connect
 
     cfg = cfg or load_settings()
     key = api_key_from_env(cfg)
     if not key:
         raise CntrlError(f"no cntrl API key in ${cfg.get('api_key_env')}")
     client = CntrlClient(str(cfg["base_url"]), key)
-    conn = kdb.connect(board=(cfg.get("board") or None))
+    conn = connect(board=(cfg.get("board") or None))
     try:
         return sync_down(client, conn, cfg=cfg, state=state)
     finally:

@@ -28,9 +28,9 @@ def _client() -> Optional[core.CntrlClient]:
 
 
 def _conn(board: Optional[str]):
-    from hermes_cli import kanban_db as kdb
+    from hermes_cli.kanban_db_connect import connect
 
-    return kdb.connect(board=board or (_cfg.get("board") or None))
+    return connect(board=board or (_cfg.get("board") or None))
 
 
 def _push(task_id: Optional[str], board: Optional[str], reason: Optional[str] = None) -> None:
@@ -67,15 +67,31 @@ def _on_updated(task_id: str = None, board: str = None, changed_fields: Any = No
         _push(task_id, board)
 
 
+def _poll_once(failures: int) -> tuple[int, float]:
+    """Run one pull; return the new failure count and the wait before the next.
+
+    An unreachable cntrl logs once when the outage starts and once when it
+    ends; the pulls in between back off instead of warning every interval."""
+    base = max(5, int(_cfg.get("poll_seconds") or 0))
+    try:
+        report = core.run_once(_state, cfg=_cfg)
+    except Exception as exc:
+        if failures == 0:
+            log.warning("cntrl_sync: pull failed: %s (backing off until cntrl answers)", exc)
+        else:
+            log.debug("cntrl_sync: pull failed again (%d): %s", failures + 1, exc)
+        return failures + 1, core.poll_backoff_seconds(base, failures + 1)
+    if failures:
+        log.info("cntrl_sync: pull recovered after %d failed attempts", failures)
+    if report["created"] or report["updated"] or report["closed"] or report["errors"]:
+        log.info("cntrl_sync: pull %s", {k: v for k, v in report.items() if k != "errors"} | {"errors": len(report["errors"])})
+    return 0, base
+
+
 def _poll_loop() -> None:
-    interval = max(5, int(_cfg.get("poll_seconds") or 0))
-    while not _stop.wait(interval):
-        try:
-            report = core.run_once(_state, cfg=_cfg)
-            if report["created"] or report["updated"] or report["closed"] or report["errors"]:
-                log.info("cntrl_sync: pull %s", {k: v for k, v in report.items() if k != "errors"} | {"errors": len(report["errors"])})
-        except Exception as exc:
-            log.warning("cntrl_sync: pull failed: %s", exc)
+    failures, delay = 0, max(5, int(_cfg.get("poll_seconds") or 0))
+    while not _stop.wait(delay):
+        failures, delay = _poll_once(failures)
 
 
 def register(ctx) -> None:
