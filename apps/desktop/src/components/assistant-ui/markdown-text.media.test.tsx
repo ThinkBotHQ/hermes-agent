@@ -1,12 +1,15 @@
+import { LOCAL_CONNECTION_ID } from '@hermes/shared'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { type ComposerScope, ComposerScopeProvider, MAIN_COMPOSER_SCOPE } from '@/app/chat/composer/scope'
 import { $connection } from '@/store/session'
 
 import { MarkdownImage, MarkdownTextContent, MessageTextContent } from './markdown-text'
 
 const REMOTE_IMAGE_PATH = '/home/user/project/images/remote-preview.png'
 const REMOTE_IMAGE_DATA_URL = 'data:image/png;base64,cmVtb3RlLWltYWdl'
+const LOCAL_IMAGE_DATA_URL = 'data:image/png;base64,bG9jYWwtaW1hZ2U='
 
 describe('MarkdownTextContent remote images', () => {
   const api = vi.fn(async ({ path }: { path: string }) => {
@@ -88,5 +91,46 @@ describe('MessageTextContent MEDIA directives', () => {
 
     await waitFor(() => expect(container.querySelector('audio[controls]')).not.toBeNull())
     expect(container.textContent).not.toContain('MEDIA:')
+  })
+})
+
+// A local session's pane can stay open while a remote host is the foreground
+// connection. Its MEDIA files live on this disk: the video must stream from
+// here, the same owner the image in that message already resolves against.
+describe('MessageTextContent media in a local-owned pane under a remote foreground', () => {
+  const api = vi.fn(async () => ({ dataUrl: 'data:image/png;base64,cmVtb3Rl' }))
+  const readFileDataUrl = vi.fn(async () => LOCAL_IMAGE_DATA_URL)
+  const localScope: ComposerScope = { ...MAIN_COMPOSER_SCOPE, connectionId: LOCAL_CONNECTION_ID, profile: 'default' }
+  let originalDesktop: typeof window.hermesDesktop
+
+  beforeEach(() => {
+    api.mockClear()
+    readFileDataUrl.mockClear()
+    originalDesktop = window.hermesDesktop
+    Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { api, readFileDataUrl } })
+    $connection.set({ connectionId: 'tb-worker-host', mode: 'remote', profile: 'default' } as never)
+  })
+
+  afterEach(() => {
+    cleanup()
+    $connection.set(null)
+    Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: originalDesktop })
+  })
+
+  it('streams the video from this device, like the image beside it', async () => {
+    const { container } = render(
+      <ComposerScopeProvider value={localScope}>
+        <MessageTextContent text={'![shot](/Users/me/out/shot.png)\n\nMEDIA:/Users/me/out/clip.mp4'} />
+      </ComposerScopeProvider>
+    )
+
+    const image = await screen.findByRole('img', { name: 'shot' })
+
+    expect(image.getAttribute('src')).toBe(LOCAL_IMAGE_DATA_URL)
+    await waitFor(() => expect(container.querySelector('video')).not.toBeNull())
+    expect(container.querySelector('video')?.getAttribute('src')).toBe(
+      'hermes-media://stream/%2FUsers%2Fme%2Fout%2Fclip.mp4'
+    )
+    expect(api).not.toHaveBeenCalled()
   })
 })

@@ -178,6 +178,24 @@ describe('resolveMediaPlaybackSrc', () => {
       'hermes-media://stream/C%3A%5Crenders%5Cdemo.mp4'
     )
   })
+
+  it('streams a local-owned video from this device under a remote foreground', async () => {
+    vi.stubGlobal('window', { hermesDesktop: { api: vi.fn() } })
+    $connection.set({ connectionId: 'tb-worker-host', mode: 'remote', profile: 'default' } as never)
+
+    await expect(
+      resolveMediaPlaybackSrc('/Users/me/out/clip.mp4', { connectionId: 'local', profile: 'default' })
+    ).resolves.toBe('hermes-media://stream/%2FUsers%2Fme%2Fout%2Fclip.mp4')
+  })
+
+  it('proxies a remote-owned video through its own connection under a local foreground', async () => {
+    vi.stubGlobal('window', { hermesDesktop: { api: vi.fn() } })
+    $connection.set({ connectionId: 'local', mode: 'local', profile: 'default' } as never)
+
+    await expect(
+      resolveMediaPlaybackSrc('/root/out/clip.mp4', { connectionId: 'tb-worker-host', profile: 'work' })
+    ).resolves.toBe('hermes-media://remote/%2Froot%2Fout%2Fclip.mp4?connectionId=tb-worker-host&profile=work')
+  })
 })
 
 describe('gatewayMediaDataUrl', () => {

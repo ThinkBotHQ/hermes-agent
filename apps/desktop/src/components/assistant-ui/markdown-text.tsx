@@ -18,7 +18,7 @@ import { ZoomableImage } from '@/components/chat/zoomable-image'
 import { ErrorBoundary } from '@/components/error-boundary'
 import { SendToBlock, SendToSourceProvider } from '@/components/owner-forward/send-to-block'
 import { StageQuestionBlock } from '@/components/owner-forward/stage-question-block'
-import { useMediaImage } from '@/hooks/use-media-image'
+import { useMediaImage, useMediaOwner } from '@/hooks/use-media-image'
 import { detectArtifact } from '@/lib/artifact-detect'
 import { renderMediaTags } from '@/lib/chat-messages/parts'
 import { normalizeExternalUrl, openExternalLink, PrettyLink } from '@/lib/external-link'
@@ -179,6 +179,7 @@ function MediaPlaybackAttachment({ path }: { path: string }) {
   const [src, setSrc] = useState('')
   const [failed, setFailed] = useState(false)
   const { open, openFailed } = useOpenMediaFile(path)
+  const owner = useMediaOwner()
   const kind = mediaKind(path)
   const name = mediaName(path)
 
@@ -197,7 +198,7 @@ function MediaPlaybackAttachment({ path }: { path: string }) {
       }
     }
 
-    void resolveMediaPlaybackSrc(path)
+    void resolveMediaPlaybackSrc(path, owner)
       .then(value => {
         if (value.startsWith('blob:')) {
           objectUrl = value
@@ -222,7 +223,7 @@ function MediaPlaybackAttachment({ path }: { path: string }) {
         URL.revokeObjectURL(objectUrl)
       }
     }
-  }, [kind, path])
+  }, [kind, owner, path])
 
   if (kind === 'audio' && src) {
     return (

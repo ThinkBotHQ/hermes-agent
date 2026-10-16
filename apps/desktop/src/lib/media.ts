@@ -203,16 +203,23 @@ export function rememberMediaImageFailure(key: string): void {
 // remote URLs untouched and route filesystem paths through the Electron media
 // protocol. Its main-process handler reads local files directly or proxies a
 // remote gateway with the connection's bearer/cookie/token authentication.
-export async function resolveMediaPlaybackSrc(path: string): Promise<string> {
+// `owner` is the same pane owner images resolve against: an explicit local
+// owner streams from this disk even with a remote foreground, and an explicit
+// remote owner is proxied through its own connection, not the foreground's.
+export async function resolveMediaPlaybackSrc(path: string, owner?: OwnerScope): Promise<string> {
   if (isInlineMediaSrc(path)) {
     return path
   }
 
   if (window.hermesDesktop && ['audio', 'video'].includes(mediaKind(path))) {
-    return isRemoteGateway() ? mediaGatewayStreamUrl(path) : mediaStreamUrl(path)
+    if (owner?.connectionId) {
+      return owner.connectionId === LOCAL_CONNECTION_ID ? mediaStreamUrl(path) : mediaGatewayStreamUrl(path, owner)
+    }
+
+    return isRemoteGateway() ? mediaGatewayStreamUrl(path, owner) : mediaStreamUrl(path)
   }
 
-  return resolveMediaDisplaySrc(path)
+  return resolveMediaDisplaySrc(path, owner)
 }
 
 // Resolve a media path to a URL the shell can open. Remote mode rewrites
@@ -240,15 +247,17 @@ export function mediaExternalUrl(path: string): string {
 // connections intentionally expose no static token to the renderer, so a bare
 // HTTPS source cannot authenticate reliably. The custom protocol keeps secrets
 // out of renderer URLs while forwarding Range requests to /api/files/stream.
-export function mediaGatewayStreamUrl(path: string): string {
+export function mediaGatewayStreamUrl(path: string, owner?: OwnerScope): string {
   const conn = $connection.get()
 
-  if (isRemoteGateway()) {
+  if (owner?.connectionId || isRemoteGateway()) {
     const file = encodeURIComponent(filePathFromMediaPath(path))
+    const connectionId = owner?.connectionId || conn?.connectionId
+    const profile = owner?.profile ?? conn?.profile
 
     const scope = [
-      conn?.connectionId ? `connectionId=${encodeURIComponent(conn.connectionId)}` : '',
-      conn?.profile ? `profile=${encodeURIComponent(conn.profile)}` : ''
+      connectionId ? `connectionId=${encodeURIComponent(connectionId)}` : '',
+      profile ? `profile=${encodeURIComponent(profile)}` : ''
     ]
       .filter(Boolean)
       .join('&')

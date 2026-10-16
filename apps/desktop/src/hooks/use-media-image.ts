@@ -1,6 +1,7 @@
 import { useStore } from '@nanostores/react'
 import { type CSSProperties, useEffect, useMemo, useState } from 'react'
 
+import type { OwnerScope } from '@/api/client'
 import { useComposerScope } from '@/app/chat/composer/scope'
 import {
   getMediaImageDimensions,
@@ -13,6 +14,21 @@ import {
   resolveMediaDisplaySrc
 } from '@/lib/media'
 import { $connection } from '@/store/session'
+
+/** The backend that owns this surface's media: the pane's session owner
+ * (composer scope), else the foreground connection. undefined when the scope
+ * names no owner, so the resolvers keep their foreground behavior. */
+export function useMediaOwner(): OwnerScope | undefined {
+  const connection = useStore($connection)
+  const scope = useComposerScope()
+  const connectionId = scope.connectionId || connection?.connectionId
+  const profile = scope.profile ?? connection?.profile
+
+  return useMemo(
+    () => (scope.connectionId || scope.profile ? { connectionId, profile } : undefined),
+    [scope.connectionId, scope.profile, connectionId, profile]
+  )
+}
 
 /** Keep a frame for one source/owner for its mounted lifetime. Hints are not
  * intrinsic dimensions: a cold image is contained in that frame, not allowed
@@ -29,15 +45,7 @@ export function useMediaImage(
   { preservePendingFrame = false }: { preservePendingFrame?: boolean } = {}
 ) {
   const connection = useStore($connection)
-  const scope = useComposerScope()
-  const connectionId = scope.connectionId || connection?.connectionId
-  const profile = scope.profile ?? connection?.profile
-
-  const owner = useMemo(
-    () => (scope.connectionId || scope.profile ? { connectionId, profile } : undefined),
-    [scope.connectionId, scope.profile, connectionId, profile]
-  )
-
+  const owner = useMediaOwner()
   const key = mediaImageKey(path, connection, owner)
   const ownerKey = mediaImageKey('', connection, owner)
 
