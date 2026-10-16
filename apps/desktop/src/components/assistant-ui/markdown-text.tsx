@@ -234,9 +234,11 @@ function MediaPlaybackAttachment({ path }: { path: string }) {
     )
   }
 
+  // `not-prose`: Typography's `:where(video)` margin would add a dead band
+  // above and below the player inside the card (see MarkdownImageContent).
   if (kind === 'video' && src) {
     return (
-      <span className="my-3 block max-w-2xl rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3">
+      <span className="not-prose my-3 block max-w-2xl rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3">
         <span className="mb-2 block truncate text-xs font-medium text-muted-foreground">{name}</span>
         <TranscriptVideo
           className="block max-h-112 w-full rounded-lg bg-black"
@@ -436,10 +438,15 @@ function MarkdownImageContent({
   // the w-fit container hugs it so the download button and shadow sit on the
   // image, not on the letterbox. Without a frame (a source that failed last
   // time) it lays out as a plain capped image, like before frames existed.
+  //
+  // `not-prose` is load-bearing: the transcript is `.prose`, and Typography's
+  // `:where(img)` margin (2em) ties the image's `m-0` and wins on order. That
+  // pushes the image 2em down its frame while `max-h-full` still lets it fill
+  // the frame, so it overflows the reserved box onto the next line of text.
   const framed = Boolean(image.frameStyle)
 
   return (
-    <span className="relative my-2 block max-w-full" data-slot="aui_markdown-image" style={image.frameStyle}>
+    <span className="not-prose relative my-2 block max-w-full" data-slot="aui_markdown-image" style={image.frameStyle}>
       {image.src ? (
         <ZoomableImage
           {...props}
